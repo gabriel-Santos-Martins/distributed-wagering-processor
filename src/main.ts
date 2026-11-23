@@ -2,16 +2,19 @@ import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { createApplication } from './infrastructure/composition';
 import { ApiModule, HttpErrors } from './infrastructure/http/api';
+import { authSettingsFromEnv } from './infrastructure/http/auth';
 import { Queues, Workers, type WorkerHooks } from './infrastructure/messaging/sqs';
 import { log } from './infrastructure/observability';
 import { connect } from './infrastructure/persistence/database';
 
 /** Composition root: database, application, HTTP API and the SQS, outbox and reference workers. */
 export async function main(hooks?: WorkerHooks) {
+  // Read first: a misconfigured AUTH_MODE stops the process before it opens any connection.
+  const auth = authSettingsFromEnv();
   const db = await connect();
   const queues = new Queues();
   const { unitOfWork, wagering } = createApplication(db);
-  const app = await NestFactory.create(ApiModule.register(db, queues, wagering), { logger: false });
+  const app = await NestFactory.create(ApiModule.register(db, queues, wagering, auth), { logger: false });
   app.useGlobalFilters(new HttpErrors());
   const workers = new Workers(unitOfWork, queues, wagering, hooks);
   const shutdown = async () => {
@@ -28,6 +31,8 @@ export async function main(hooks?: WorkerHooks) {
 }
 
 if (require.main === module) void main().catch(error => {
-  log('startup_error', { errorType: error instanceof Error ? error.name : 'UnknownError' });
+  // Startup errors carry configuration or connection details, never request data.
+  log('startup_error', { errorType: error instanceof Error ? error.name : 'UnknownError',
+    message: error instanceof Error ? error.message : undefined });
   process.exit(1);
 });

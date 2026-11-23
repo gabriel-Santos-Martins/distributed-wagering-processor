@@ -6,7 +6,39 @@ O módulo Nest compõe o adaptador HTTP, a identidade do provedor e o caso de us
 
 O Bun executa o JavaScript gerado pelo `tsc`. O compilador emite os metadados de decorators que o Nest usa para injeção. A migration registra a classe diretamente, evitando descoberta de arquivos TypeScript no contêiner.
 
-Autenticação foi adiada conforme o timebox. `ProviderIdentity.verify` é o ponto de extensão HTTP. A integração usaria um guard OIDC com validação de emissor, audiência, validade, assinatura e rotação via JWKS. O principal teria um vínculo com `providerId`, e a autorização de leitura/escrita também verificaria o vínculo com o player. Health permanece aberto. O consumidor confia no canal interno e aplica validações de ID, wallet, player, moeda e escopo das referências.
+## Autenticação
+
+O Identity Provider é o **Keycloak** (realm `wagering`, em `docker/keycloak/wagering-realm.json`), e a API não guarda usuário nem senha. Cada sistema chamador é um client confidencial que obtém o access token pelo fluxo **client credentials**, que é o caso de máquina para máquina de um provedor de jogos.
+
+| Client | Roles do realm | Claim `provider_id` | Pode |
+|---|---|---|---|
+| `provider-a`, `provider-b` | `provider` | o próprio id | enviar transações do próprio provider e ler as próprias transações |
+| `back-office` | `operator` | nenhum | abrir e ler wallets, ledger e transações, rodar reconciliação |
+| `wagering-console` | `operator`, `provider` | `console-local` | o console local de testes |
+
+A audiência `wagering-api` entra no token por um *audience mapper*, e o `provider_id` por um *hardcoded claim mapper* por client. Os segredos do realm são de desenvolvimento.
+
+**Validação.** Um `AuthGuard` global do NestJS (`src/infrastructure/http/auth.ts`) exige `Authorization: Bearer`. O `OidcTokenVerifier` (`oidc.ts`) usa só `node:crypto`, sem biblioteca externa:
+- aceita apenas RS256, recusando `none` e HMAC, que aceitaria a chave pública como segredo;
+- verifica a assinatura pela chave do JWKS com o `kid` do token;
+- confere emissor, audiência, `exp` e `nbf` com tolerância de 5 s, e `sub`.
+
+O JWKS fica em cache por 10 minutos e é relido quando aparece um `kid` desconhecido, o que cobre a rotação de chaves. Os papéis vêm de `realm_access.roles`.
+
+**Autorização por rota.** `@Roles` declara o papel exigido. Enviar transação exige o papel `provider` e `provider_id` igual ao `providerId` do payload (`PROVIDER_MISMATCH`, 403). Ler a transação de outro provider responde 404, para não revelar ids. A consulta por `/providers/:providerId/...` exige o mesmo provider ou `operator`. Wallets, ledger e reconciliação exigem `operator`. Health e métricas ficam abertos (`@Public`), como pede o desafio.
+
+| Situação | HTTP |
+|---|---|
+| Sem token, token malformado, expirado, de outro emissor ou audiência, assinatura inválida | 401 `UNAUTHENTICATED` com `WWW-Authenticate: Bearer` |
+| Papel insuficiente | 403 `FORBIDDEN` |
+| Provider do token diferente do provider da operação | 403 `PROVIDER_MISMATCH` |
+| JWKS inalcançável | 503 `IDENTITY_PROVIDER_UNAVAILABLE` (reenviável) |
+
+**Configuração.** `AUTH_MODE=oidc` é o padrão e exige `OIDC_ISSUER` e `OIDC_AUDIENCE`. Sem eles, o processo não sobe. `OIDC_JWKS_URI` separa o endereço de busca das chaves do emissor público: no Compose, o token diz `http://localhost:8080/realms/wagering` e a API busca as chaves em `http://keycloak:8080`. `AUTH_MODE=disabled` existe só para as suítes e o console local, e trata toda requisição como operador sem vínculo de provider.
+
+**Fila.** Mensagens SQS são canal interno confiável e não carregam token. A identidade do provider na mensagem passa pelas mesmas validações de domínio: escopo da wallet, player, moeda e referências.
+
+**Limites.** Não há vínculo entre provider e player ou wallet no modelo, então um provider autenticado pode operar qualquer wallet existente, desde que com o próprio `providerId`. Em produção, um cadastro de jogadores por provider fecharia isso. Também não há revogação imediata: um token vale até expirar (5 minutos no realm).
 
 ## Modelo de domínio
 
@@ -94,7 +126,7 @@ Falhas de conexão, locks, erros desconhecidos e erros externos ao savepoint ret
 
 ## Contratos e mensageria
 
-HTTP retorna 201 para abertura, 200 para consulta, reconciliação e apostas aplicadas, 202 para pendências, 400 para entrada inválida, 404 para entidade ausente, 409 para conflitos, 422 para rejeições auditadas e 503 para dependência indisponível. Erros de entrada usam `{"error":"CODIGO"}`. Respostas de transação seguem o contrato com `failureCode` e `failureAction` quando aplicável. Uma transição a partir de estado terminal (`InvalidTransactionStateError`) responde 500 `INTERNAL_ERROR`, porque é erro de programação e não indisponibilidade.
+HTTP retorna 201 para abertura, 200 para consulta, reconciliação e apostas aplicadas, 202 para pendências, 400 para entrada inválida, 401 para token ausente ou inválido, 403 para papel ou provider sem permissão, 404 para entidade ausente, 409 para conflitos, 422 para rejeições auditadas e 503 para dependência indisponível. Erros de entrada usam `{"error":"CODIGO"}`. Respostas de transação seguem o contrato com `failureCode` e `failureAction` quando aplicável. Uma transição a partir de estado terminal (`InvalidTransactionStateError`) responde 500 `INTERNAL_ERROR`, porque é erro de programação e não indisponibilidade.
 
 SQS recebe de `wager-transactions.fifo`. O consumidor só faz ack após o commit e grava o inbox dentro da mesma transação com wager, saldo, ledger e outbox. Erros de negócio terminam como `REJECTED` auditado, com commit e ack. Erros permanentes vão para `wager-transactions-dlq.fifo` com o código no atributo `failureCode`: envelope ou payload inválido, wallet inexistente, conflitos de idempotência e `FAILED`. Falhas transitórias voltam à fila com backoff até o limite de entregas.
 

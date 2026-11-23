@@ -12,9 +12,29 @@ docker compose --profile cluster up --build -d
 curl http://localhost:3000/health/ready
 ```
 
-O serviço de migrations termina antes de iniciar as aplicações. O perfil `cluster` publica três processos nas portas 3000, 3001 e 3002. Sem o perfil, o Compose sobe apenas a aplicação na porta 3000. PostgreSQL e LocalStack ficam acessíveis nas portas 5432 e 4566.
+O serviço de migrations termina antes de iniciar as aplicações. O perfil `cluster` publica três processos nas portas 3000, 3001 e 3002. Sem o perfil, o Compose sobe apenas a aplicação na porta 3000. PostgreSQL, LocalStack e Keycloak ficam acessíveis nas portas 5432, 4566 e 8080. O Keycloak importa o realm `wagering` na partida; o console de administração usa `admin`/`admin` (somente desenvolvimento).
 
 Ao rodar a aplicação no host, configure `DATABASE_URL`, `SQS_ENDPOINT` e `PORT` se precisar alterar os padrões. Use `HOST=127.0.0.1` para restringir a API à máquina local. `SQS_QUEUE_BASE` permite sobrescrever a base dos URLs das filas, por exemplo `http://localhost:4566/000000000000` com MiniStack. Execute `bun run build` seguido de `bun run start`.
+
+## Autenticação
+
+Os endpoints, exceto health e métricas, exigem um access token do Keycloak. Provedores e back office são clients confidenciais e obtêm o token por client credentials:
+
+```sh
+TOKEN=$(curl -s -X POST http://localhost:8080/realms/wagering/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=provider-a -d client_secret=provider-a-local-secret | jq -r .access_token)
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:3000/providers/provider-a/wagering/transactions/bet-1
+```
+
+| Client | Segredo (dev) | Uso |
+|---|---|---|
+| `provider-a`, `provider-b` | `provider-a-local-secret`, `provider-b-local-secret` | enviar e ler transações do próprio provider |
+| `back-office` | `back-office-local-secret` | abrir wallets, ler ledger e transações, reconciliar |
+| `wagering-console` | `wagering-console-local-secret` | console local |
+
+Variáveis da API: `AUTH_MODE` (`oidc`, padrão, ou `disabled` apenas para testes locais), `OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_JWKS_URI` (opcional) e `OIDC_PROVIDER_CLAIM` (padrão `provider_id`). Sem `OIDC_ISSUER` e `OIDC_AUDIENCE`, com `AUTH_MODE=oidc`, a API não sobe. As suítes `test:integration` e `test:concurrency` usam `AUTH_MODE=disabled`. Decisões e limites estão no `ARCHITECTURE.md`.
+
+Para o console usar o Keycloak, inicie-o com `CONSOLE_TOKEN_URL=<realm>/protocol/openid-connect/token`, `CONSOLE_CLIENT_ID=wagering-console` e `CONSOLE_CLIENT_SECRET=wagering-console-local-secret`. O proxy do console obtém o token no servidor e o segredo não chega ao navegador.
 
 ## Console web local
 
@@ -63,6 +83,8 @@ Para repetir apenas os cenários HTTP e PostgreSQL da suíte de concorrência, d
 | `bun run test:unit` | 22 passaram. Escala, precisão, regras de domínio, versões, ledger, conflito de hash, transições inválidas, eventos de integração, backoff da outbox, inbox e taxonomia de falhas. |
 | `bun run test:integration` | 7 passaram com PostgreSQL 17.7 nativo, também em execução repetida no mesmo banco. Inclui rollback financeiro via savepoint, registro auditável de `FAILED` após falha permanente e rejeição auditada de moeda ou player divergente. |
 | `bun run test:concurrency` com MiniStack 1.1.10 | 10 cenários passaram com três processos, incluindo corrida HTTP/SQS, 20 wallets com 120 BETs concorrentes, quedas da outbox, reentrega, rollback antes do commit, `FAILED` com replay e encaminhamento para DLQ. |
+| `bun run test:auth` | 16 passaram. Verificador OIDC com chaves RSA e JWKS locais: token válido, expirado, de outro emissor ou audiência, assinatura trocada, `alg: none`, HS256 com chave pública, payload adulterado e JWKS fora do ar; e a API compilada com `AUTH_MODE=oidc` respondendo 401, 403, 404 e 200 conforme papel e provider. |
+| `bun run test:keycloak` contra Keycloak 26.4.0 real | 12 checagens passaram com o realm `wagering` importado: tokens por client credentials de `provider-a`, `provider-b` e `back-office`, claims de emissor, audiência e `provider_id`, e a matriz de autorização. O Keycloak rodou sem Docker, a partir da distribuição oficial com JDK 21 (porta 8180). |
 | Docker Compose | YAML e dependências entre serviços verificados estaticamente. A CLI Docker e uma distribuição WSL estavam indisponíveis, então a inicialização dos contêineres ficou sem execução. |
 
 ### Teste de carga

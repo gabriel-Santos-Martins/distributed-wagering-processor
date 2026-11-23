@@ -3,13 +3,38 @@ x-application: &application
   environment:
     DATABASE_URL: postgresql://wager:wager@postgres:5432/wager
     SQS_ENDPOINT: http://localstack:4566
+    AUTH_MODE: oidc
+    # Tokens carry the public issuer; the API fetches signing keys over the Compose network.
+    OIDC_ISSUER: http://localhost:8080/realms/wagering
+    OIDC_JWKS_URI: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
+    OIDC_AUDIENCE: wagering-api
   depends_on:
     migrate:
       condition: service_completed_successfully
     localstack:
       condition: service_healthy
+    keycloak:
+      condition: service_healthy
 
 services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8080
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports: ["8080:8080"]
+    volumes:
+      - ./docker/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      # The image has no curl; bash opens the management port directly.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
   postgres:
     image: postgres:17.7-alpine
     command: ["postgres", "-c", "log_min_error_statement=panic"]

@@ -1,37 +1,46 @@
 import { ArgumentsHost, Body, Catch, Controller, ExceptionFilter, Get, Headers, HttpException, Inject,
-  Injectable, Module, Param, Post, Query, Res, type DynamicModule } from '@nestjs/common';
+  Module, Param, Post, Query, Req, Res, type DynamicModule } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { identifier, moneyFrom, record, uuid, wagerFrom } from '../../application/contracts';
 import { Wagering } from '../../application/wagering';
 import { DomainError, InvalidTransactionStateError } from '../../domain';
 import { Queues } from '../messaging/sqs';
 import { log, metricSnapshot } from '../observability';
 import { query, type Database } from '../persistence/database';
+import { assertCanSubmitFor, AUTH_SETTINGS, AuthGuard, type AuthSettings, canActForProvider, principalOf, Public,
+  Role, Roles } from './auth';
 
-type Response = { status(code: number): Response; json(body: unknown): void };
+type Response = {
+  status(code: number): Response;
+  json(body: unknown): void;
+  setHeader?(name: string, value: string): void;
+};
+type Request = Parameters<typeof principalOf>[0];
 const statusCodes = { PROCESSED: 200, PENDING: 202, PENDING_REFERENCE: 202, REJECTED: 422, FAILED: 500 };
 const DATABASE = Symbol('Database');
 
-@Injectable()
-export class ProviderIdentity {
-  // An OIDC adapter can compare the authenticated provider claim with this input.
-  async verify(_providerId: string): Promise<void> {}
-}
-
+/**
+ * Operators manage wallets and read everything. Providers submit transactions and read their own.
+ * Health and metrics stay open.
+ */
 @Controller()
 class Api {
   constructor(private readonly wagering: Wagering, private readonly queues: Queues,
-    private readonly identity: ProviderIdentity, @Inject(DATABASE) private readonly db: Database) {}
+    @Inject(DATABASE) private readonly db: Database) {}
 
   @Post('wallets')
+  @Roles(Role.Operator)
   open(@Body() raw: unknown) {
     const body = record(raw);
     return this.wagering.open(uuid(body.playerId), moneyFrom(body.initialBalance));
   }
 
   @Get('wallets/:walletId')
+  @Roles(Role.Operator)
   wallet(@Param('walletId') id: string) { return this.wagering.getWallet(uuid(id)); }
 
   @Get('wallets/:walletId/ledger')
+  @Roles(Role.Operator)
   async ledger(@Param('walletId') id: string, @Query('limit') rawLimit: unknown, @Query('cursor') cursor: unknown) {
     const walletId = uuid(id);
     const textLimit = rawLimit ?? '50';
@@ -54,29 +63,46 @@ class Api {
   }
 
   @Post('wagering/transactions')
-  async submit(@Body() body: unknown, @Headers('idempotency-key') key: unknown, @Res() response: Response) {
+  @Roles(Role.Provider)
+  async submit(@Req() request: Request, @Body() body: unknown, @Headers('idempotency-key') key: unknown,
+    @Res() response: Response) {
     const input = wagerFrom(body);
-    await this.identity.verify(input.providerId);
+    assertCanSubmitFor(principalOf(request), input.providerId);
     const result = (await this.wagering.submit(input, identifier(key, 'IDEMPOTENCY_KEY_REQUIRED')))!;
     response.status(statusCodes[result.status]).json(result);
   }
 
   @Get('wagering/transactions/:transactionId')
-  transaction(@Param('transactionId') id: string) { return this.wagering.getTransaction(uuid(id)); }
+  @Roles(Role.Operator, Role.Provider)
+  async transaction(@Req() request: Request, @Param('transactionId') id: string) {
+    const transaction = await this.wagering.getTransaction(uuid(id));
+    // Another provider's transaction answers like a missing one, so ids cannot be probed.
+    if (!canActForProvider(principalOf(request), transaction.providerId)) {
+      throw new DomainError('TRANSACTION_NOT_FOUND', 404);
+    }
+    return transaction;
+  }
 
   @Get('providers/:providerId/wagering/transactions/:externalTransactionId')
-  externalTransaction(@Param('providerId') provider: string, @Param('externalTransactionId') id: string) {
-    return this.wagering.getTransaction(identifier(id), identifier(provider));
+  @Roles(Role.Operator, Role.Provider)
+  externalTransaction(@Req() request: Request, @Param('providerId') provider: string,
+    @Param('externalTransactionId') id: string) {
+    const providerId = identifier(provider);
+    if (!canActForProvider(principalOf(request), providerId)) throw new DomainError('PROVIDER_MISMATCH', 403);
+    return this.wagering.getTransaction(identifier(id), providerId);
   }
 
   @Post('wallets/:walletId/reconciliation')
+  @Roles(Role.Operator)
   async reconcile(@Param('walletId') id: string, @Res() response: Response) {
     response.status(200).json(await this.wagering.reconcile(uuid(id)));
   }
 
+  @Public()
   @Get('health/live')
   live() { return { status: 'ok' }; }
 
+  @Public()
   @Get('health/ready')
   async ready() {
     try {
@@ -89,6 +115,7 @@ class Api {
    * Counters are per process. Gauges are read from PostgreSQL and the broker at scrape time, so outbox lag
    * keeps growing even when no publisher is running.
    */
+  @Public()
   @Get('metrics')
   async metrics() {
     const [database, dlq] = await Promise.allSettled([
@@ -115,6 +142,7 @@ export class HttpErrors implements ExceptionFilter {
   catch(error: unknown, host: ArgumentsHost): void {
     const response = host.switchToHttp().getResponse<Response>();
     if (error instanceof DomainError) {
+      if (error.httpStatus === 401) response.setHeader?.('WWW-Authenticate', 'Bearer');
       response.status(error.httpStatus).json({ error: error.code });
     } else if (error instanceof HttpException) {
       response.status(error.getStatus()).json({ error: error.getStatus() === 400 ? 'INVALID_PAYLOAD' : 'HTTP_ERROR' });
@@ -131,12 +159,13 @@ export class HttpErrors implements ExceptionFilter {
 
 @Module({})
 export class ApiModule {
-  static register(db: Database, queues: Queues, wagering: Wagering): DynamicModule {
+  static register(db: Database, queues: Queues, wagering: Wagering, auth: AuthSettings): DynamicModule {
     return { module: ApiModule, controllers: [Api], providers: [
-      ProviderIdentity,
       { provide: Wagering, useValue: wagering },
       { provide: Queues, useValue: queues },
       { provide: DATABASE, useValue: db },
+      { provide: AUTH_SETTINGS, useValue: auth },
+      { provide: APP_GUARD, useClass: AuthGuard },
     ] };
   }
 }

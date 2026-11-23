@@ -15,7 +15,7 @@ const brokerTest = postgresOnly ? test.skip : test;
 
 async function start(port: number, crashPoint?: string, target?: string) {
   const child = Bun.spawn([process.execPath, 'test/child.cjs'], {
-    env: { ...process.env, PORT: String(port), DISABLE_WORKERS: '0', TEST_CRASH_POINT: crashPoint, TEST_CRASH_TARGET: target },
+    env: { ...process.env, AUTH_MODE: 'disabled', PORT: String(port), DISABLE_WORKERS: '0', TEST_CRASH_POINT: crashPoint, TEST_CRASH_TARGET: target },
     stdout: 'ignore', stderr: 'inherit',
     ipc: () => {},
   });
