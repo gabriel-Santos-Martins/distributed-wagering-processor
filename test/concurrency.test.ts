@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { DeleteMessageCommand, ReceiveMessageCommand, SendMessageCommand } from '@aws-sdk/client-sqs';
-import { query } from '../src/database';
+import { query } from '../src/infrastructure/persistence/database';
 import { Money } from '../src/domain';
-import { Wagering } from '../src/wagering';
+import { createWagering } from '../src/infrastructure/composition';
 import { checkLedger, dto, eventually, ids, request, send, setup } from './support';
 
 let connection: Awaited<ReturnType<typeof setup>>;
@@ -197,7 +197,7 @@ test('out-of-order REFUND reaches PROCESSED and pending replay advances to final
 brokerTest('crash after commit before ack triggers broker redelivery and inbox dedup after restart', async () => {
   const { db, queues } = connection;
   await Promise.all(ports.map(stop));
-  const api = new Wagering(db);
+  const api = createWagering(db);
   const { providerId, playerId } = ids();
   const wallet = await api.open(playerId, Money.from(dto('100')));
   const payload = { providerId, playerId, walletId: wallet.id, externalTransactionId: 'bet',
@@ -218,7 +218,7 @@ brokerTest('crash after commit before ack triggers broker redelivery and inbox d
 brokerTest('publisher crashes before send, then after send; two restarted publishers recover with stable eventId', async () => {
   const { db, queues } = connection;
   await Promise.all(ports.map(stop));
-  const wallet = await new Wagering(db).open(ids().playerId, Money.from(dto('7')));
+  const wallet = await createWagering(db).open(ids().playerId, Money.from(dto('7')));
   const em = db.em.fork();
   const events = await query<{ id: string; published_at: string | null }>(em,
     'select id, published_at from outbox where aggregate_id = ?', [wallet.id]);

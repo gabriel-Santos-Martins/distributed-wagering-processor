@@ -10,8 +10,8 @@
     "frontend:css": "tailwindcss -c frontend/tailwind.config.cjs -i frontend/styles.css -o frontend/generated.css --minify",
     "frontend:typecheck": "tsc --project frontend/tsconfig.json",
     "frontend:build": "bun run frontend:css && bun build frontend/index.html --target browser --outdir frontend-dist --minify",
-    "migration:up": "bun dist/database.js up",
-    "migration:down": "bun dist/database.js down",
+    "migration:up": "bun dist/infrastructure/persistence/database.js up",
+    "migration:down": "bun dist/infrastructure/persistence/database.js down",
     "test:unit": "bun test test/unit.test.ts",
     "test:integration": "bun test test/integration.test.ts",
     "test:concurrency": "bun test test/concurrency.test.ts"

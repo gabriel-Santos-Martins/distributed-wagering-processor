@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { query } from '../src/database';
+import { query } from '../src/infrastructure/persistence/database';
 import { InboxMessage } from '../src/domain';
-import { wagerFrom, hash } from '../src/contracts';
+import { wagerFrom, hash } from '../src/application/contracts';
 import { Money } from '../src/domain';
-import { Wagering } from '../src/wagering';
+import { createWagering } from '../src/infrastructure/composition';
 import { checkLedger, dto, ids, setup } from './support';
 
 let connection: Awaited<ReturnType<typeof setup>>;
@@ -18,7 +18,7 @@ test('migration down/up and direct SQL guards for uniqueness, scale, balance, ar
   await migrator.down({ to: 0 });
   expect(await query(db.em.fork(), "select to_regclass('wallet') as wallet")).toEqual([{ wallet: null }]);
   await migrator.up();
-  const api = new Wagering(db);
+  const api = createWagering(db);
   const { playerId } = ids();
   const wallet = await api.open(playerId, Money.from(dto('100')));
   const run = (sql: string, args: unknown[] = [wallet.id]) => query(db.em.fork(), sql, args);
@@ -57,7 +57,7 @@ test('migration down/up and direct SQL guards for uniqueness, scale, balance, ar
 
 test('outbox failure rolls back financial state and inbox; committed retry and inbox redelivery are safe', async () => {
   const { db } = connection;
-  const api = new Wagering(db);
+  const api = createWagering(db);
   const { providerId, playerId } = ids();
   const wallet = await api.open(playerId, Money.from(dto('100')));
   const input = wagerFrom({ providerId, playerId, walletId: wallet.id, externalTransactionId: 'bet',
@@ -94,7 +94,7 @@ test('outbox failure rolls back financial state and inbox; committed retry and i
 
 test('a transaction is reversed at most once across kinds; historical replay and overdrawing reversal', async () => {
   const { db } = connection;
-  const api = new Wagering(db);
+  const api = createWagering(db);
   const { providerId, playerId } = ids();
   const wallet = await api.open(playerId, Money.from(dto('100')));
   const submit = (id: string, kind: string, amount: string, referenceExternalTransactionId?: string) => api.submit(
@@ -130,9 +130,39 @@ test('a transaction is reversed at most once across kinds; historical replay and
   expect(await checkLedger(db, wallet.id, '10.00')).toHaveLength(6);
 });
 
+test('another currency or player is persisted as an auditable rejection without touching the wallet', async () => {
+  const { db } = connection;
+  const api = createWagering(db);
+  const { providerId, playerId } = ids();
+  const wallet = await api.open(playerId, Money.from(dto('50')));
+  const submit = (id: string, overrides: Record<string, unknown>) => api.submit(wagerFrom({ providerId, playerId,
+    walletId: wallet.id, externalTransactionId: id, roundId: 'round', gameId: 'game', kind: 'BET', money: dto('10'),
+    ...overrides }), id);
+  const usd = await submit('usd', { money: { amount: '10.00', currency: 'USD' } });
+  expect(usd).toMatchObject({ status: 'REJECTED', failureCode: 'CURRENCY_MISMATCH', failureAction: 'FIX_AND_RESUBMIT',
+    balance: dto('50.00'), idempotentReplay: false });
+  expect(await submit('usd', { money: { amount: '10.00', currency: 'USD' } }))
+    .toMatchObject({ transactionId: usd!.transactionId, idempotentReplay: true, balance: dto('50.00') });
+  const stranger = await submit('stranger', { playerId: randomUUID() });
+  expect(stranger).toMatchObject({ status: 'REJECTED', failureCode: 'PLAYER_WALLET_MISMATCH' });
+  expect(JSON.parse(JSON.stringify(await api.getTransaction(usd!.transactionId)))).toMatchObject({ status: 'REJECTED',
+    money: { amount: '10.00', currency: 'USD' }, balance: dto('50.00') });
+  expect(await query(db.em.fork(), 'select event_type from outbox where aggregate_id in (?, ?) order by event_type',
+    [usd!.transactionId, stranger!.transactionId]))
+    .toEqual([{ event_type: 'WagerTransactionRejected' }, { event_type: 'WagerTransactionRejected' }]);
+  // The schema still binds an applied transaction to its wallet's player and currency.
+  await query(db.em.fork(), `do $guard$ begin
+      update wager set status = 'PROCESSED', failure_code = null, processed_at = now() where id = ?;
+      raise exception 'write unexpectedly succeeded';
+      exception when sqlstate '23514' then null;
+    end $guard$`, [usd!.transactionId]);
+  expect(await api.getWallet(wallet.id)).toMatchObject({ balance: dto('50.00'), version: 1 });
+  await checkLedger(db, wallet.id, '50.00');
+});
+
 test('reference expiration emits one rejection and a terminal reference is rejected immediately', async () => {
   const { db } = connection;
-  const api = new Wagering(db);
+  const api = createWagering(db);
   const { providerId, playerId } = ids();
   const wallet = await api.open(playerId, Money.zero('BRL'));
   const em = db.em.fork();
@@ -157,7 +187,7 @@ test('reference expiration emits one rejection and a terminal reference is rejec
 
 test('a failed pending reference is deferred and another wallet progresses', async () => {
   const { db } = connection;
-  const api = new Wagering(db);
+  const api = createWagering(db);
   const em = db.em.fork();
   const amount = Money.from(dto('1'));
   const fixtures = [];
@@ -195,7 +225,7 @@ test('a failed pending reference is deferred and another wallet progresses', asy
 
 test('a permanent write error records FAILED after rolling back the entire financial attempt', async () => {
   const { db } = connection;
-  const api = new Wagering(db);
+  const api = createWagering(db);
   const em = db.em.fork();
   const { playerId, providerId } = ids();
   const wallet = await api.open(playerId, Money.from(dto('100')));

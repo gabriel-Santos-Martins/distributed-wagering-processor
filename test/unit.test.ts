@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { wagerFrom, wagerHash } from '../src/contracts';
-import { BusinessRuleViolation, DomainError, FailureCode, InboxMessage, InvalidTransactionStateError, Money,
+import { wagerFrom, wagerHash } from '../src/application/contracts';
+import { BusinessRuleViolation, DomainError, FailureAction, FailureCode, failureActionFor, InboxMessage,
+  InvalidTransactionStateError, Money,
   OutboxMessage, Wallet, WalletBalanceChanged, WalletLedgerEntry, WagerTransaction, WagerTransactionProcessed,
   WagerTransactionRejected, type WagerInput } from '../src/domain';
 
@@ -215,4 +216,19 @@ test('outbox schedules retries with backoff and inbox records processing once', 
   inbox.markProcessed(at);
   expect(inbox.isProcessed()).toBe(true);
   expect(() => inbox.markProcessed(at)).toThrow();
+});
+
+test('every failure code has a provider action; mismatches are business rejections', () => {
+  for (const code of Object.values(FailureCode)) {
+    expect(Object.values(FailureAction)).toContain(failureActionFor(code));
+  }
+  expect(failureActionFor(FailureCode.InsufficientFunds)).toBe('DO_NOT_RETRY');
+  expect(failureActionFor(FailureCode.ReferenceExpired)).toBe('RESUBMIT_AFTER_REFERENCE');
+  expect(failureActionFor(FailureCode.CurrencyMismatch)).toBe('FIX_AND_RESUBMIT');
+  expect(failureActionFor(FailureCode.PermanentPersistenceError)).toBe('CONTACT_OPERATOR');
+  const wallet = Wallet.open({ id: randomUUID(), playerId: template.playerId, initialBalance: brl('1') });
+  expect(() => wallet.assertAccepts(randomUUID(), brl('1')))
+    .toThrow(new BusinessRuleViolation(FailureCode.PlayerWalletMismatch));
+  expect(() => wallet.assertAccepts(template.playerId, Money.zero('USD')))
+    .toThrow(new BusinessRuleViolation(FailureCode.CurrencyMismatch));
 });

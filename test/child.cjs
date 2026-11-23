@@ -11,11 +11,12 @@ process.on('message', message => {
 async function run() {
   if (crashPoint === 'publish' || crashPoint === 'mark') {
     // Isolate publisher crashes so a broker receive cannot be abandoned by this process.
-    const { connect } = require('../dist/database');
-    const { Queues, Workers } = require('../dist/messaging');
-    const { Wagering } = require('../dist/wagering');
+    const { connect } = require('../dist/infrastructure/persistence/database');
+    const { Queues, Workers } = require('../dist/infrastructure/messaging/sqs');
+    const { createApplication } = require('../dist/infrastructure/composition');
     const db = await connect();
-    const worker = new Workers(db, new Queues(), new Wagering(db), {
+    const { unitOfWork, wagering } = createApplication(db);
+    const worker = new Workers(unitOfWork, new Queues(), wagering, {
       beforePublish: id => { if (crashPoint === 'publish' && id === target) crash(); },
       afterPublish: id => { if (crashPoint === 'mark' && id === target) crash(); },
     });

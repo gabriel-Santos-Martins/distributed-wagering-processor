@@ -62,10 +62,10 @@ export class Wallet {
       balanceAfter: this._balance, createdAt: this.createdAt });
   }
 
-  /** Rejects an operation from another player or in another currency before anything is persisted. */
+  /** An operation from another player or in another currency is a business rejection, recorded as REJECTED. */
   assertAccepts(playerId: string, money: Money): void {
-    if (playerId !== this.playerId) throw new DomainError('PLAYER_WALLET_MISMATCH');
-    this.assertSameCurrency(money);
+    if (playerId !== this.playerId) throw new BusinessRuleViolation(FailureCode.PlayerWalletMismatch);
+    if (money.currency !== this.currency) throw new BusinessRuleViolation(FailureCode.CurrencyMismatch);
   }
 
   /**

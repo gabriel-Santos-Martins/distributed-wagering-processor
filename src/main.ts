@@ -1,17 +1,19 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { connect } from './database';
-import { ApiModule, HttpErrors } from './http';
-import { Queues, Workers, type WorkerHooks } from './messaging';
-import { log } from './observability';
-import { Wagering } from './wagering';
+import { createApplication } from './infrastructure/composition';
+import { ApiModule, HttpErrors } from './infrastructure/http/api';
+import { Queues, Workers, type WorkerHooks } from './infrastructure/messaging/sqs';
+import { log } from './infrastructure/observability';
+import { connect } from './infrastructure/persistence/database';
 
+/** Composition root: database, application, HTTP API and the SQS, outbox and reference workers. */
 export async function main(hooks?: WorkerHooks) {
   const db = await connect();
   const queues = new Queues();
-  const app = await NestFactory.create(ApiModule.register(db, queues), { logger: false });
+  const { unitOfWork, wagering } = createApplication(db);
+  const app = await NestFactory.create(ApiModule.register(db, queues, wagering), { logger: false });
   app.useGlobalFilters(new HttpErrors());
-  const workers = new Workers(db, queues, app.get(Wagering), hooks);
+  const workers = new Workers(unitOfWork, queues, wagering, hooks);
   const shutdown = async () => {
     await Promise.all([app.close(), workers.close()]);
     queues.client.destroy();

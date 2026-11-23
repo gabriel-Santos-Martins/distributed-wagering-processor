@@ -1,8 +1,8 @@
 import { expect } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { SendMessageCommand } from '@aws-sdk/client-sqs';
-import { connect, query, type Database } from '../src/database';
-import { Queues } from '../src/messaging';
+import { connect, query, type Database } from '../src/infrastructure/persistence/database';
+import { Queues } from '../src/infrastructure/messaging/sqs';
 
 export const baseUrl = (port: number) => 'http://127.0.0.1:' + port;
 export const dto = (amount: string) => ({ amount, currency: 'BRL' });

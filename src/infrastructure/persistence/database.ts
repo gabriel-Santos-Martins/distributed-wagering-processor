@@ -74,6 +74,44 @@ class Migration20261123000002 extends Migration {
   }
 }
 
+// A transaction from another player or in another currency is persisted as REJECTED for auditing, so the
+// composite FK to wallet(id, player_id, currency) gives way to a FK on the wallet plus a scope trigger that
+// still binds every PENDING_REFERENCE or PROCESSED row to its wallet's player and currency.
+class Migration20261123000003 extends Migration {
+  up(): void {
+    this.addSql(`
+      alter table wager drop constraint wager_wallet_id_player_id_currency_fkey;
+      alter table wager add constraint wager_wallet_fkey foreign key (wallet_id) references wallet(id);
+      alter table wager add constraint wager_currency_format check (currency ~ '^[A-Z]{3}$');
+      create function validate_wager_scope() returns trigger language plpgsql as $$
+      begin
+        if new.status in ('PENDING_REFERENCE', 'PROCESSED') and not exists (
+          select 1 from wallet w
+          where w.id = new.wallet_id and w.player_id = new.player_id and w.currency = new.currency
+        ) then
+          raise exception 'wager scope does not match its wallet' using errcode = '23514';
+        end if;
+        return new;
+      end
+      $$;
+      create trigger wager_validate_scope before insert or update on wager
+        for each row execute function validate_wager_scope();
+    `);
+  }
+
+  // NOT VALID keeps audited REJECTED rows with a mismatched player or currency, and enforces the FK for new rows.
+  down(): void {
+    this.addSql(`
+      drop trigger wager_validate_scope on wager;
+      drop function validate_wager_scope();
+      alter table wager drop constraint wager_currency_format;
+      alter table wager drop constraint wager_wallet_fkey;
+      alter table wager add constraint wager_wallet_id_player_id_currency_fkey
+        foreign key (wallet_id, player_id, currency) references wallet(id, player_id, currency) not valid;
+    `);
+  }
+}
+
 export function connect() {
   return MikroORM.init({
     clientUrl: process.env.DATABASE_URL || 'postgresql://wager:wager@localhost:5432/wager',
@@ -83,6 +121,7 @@ export function connect() {
       { name: 'Migration20261123000000', class: Migration20261123000000 },
       { name: 'Migration20261123000001', class: Migration20261123000001 },
       { name: 'Migration20261123000002', class: Migration20261123000002 },
+      { name: 'Migration20261123000003', class: Migration20261123000003 },
     ] },
     driverOptions: { connection: { statement_timeout: 12000, lock_timeout: 5000 } },
   });

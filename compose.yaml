@@ -39,7 +39,7 @@ services:
       retries: 30
   migrate:
     build: .
-    command: ["bun", "dist/database.js", "up"]
+    command: ["bun", "dist/infrastructure/persistence/database.js", "up"]
     environment:
       DATABASE_URL: postgresql://wager:wager@postgres:5432/wager
     depends_on:

@@ -37,7 +37,7 @@ bun run migration:up
 bun run migration:down  # destrói as tabelas da aplicação; use apenas em banco descartável
 ```
 
-No Compose, use `docker compose run --rm migrate bun dist/database.js down` para desfazer em um banco descartável. Para os testes, pare as aplicações antes e use filas e banco exclusivos para a suíte. A integração desfaz a migration e a aplica novamente.
+No Compose, use `docker compose run --rm migrate bun dist/infrastructure/persistence/database.js down` para desfazer em um banco descartável. Para os testes, pare as aplicações antes e use filas e banco exclusivos para a suíte. A integração desfaz a migration e a aplica novamente.
 
 ```sh
 docker compose --profile cluster stop app app2 app3
@@ -58,8 +58,8 @@ Para repetir apenas os cenários HTTP e PostgreSQL da suíte de concorrência, d
 | Comando ou requisito | Resultado no Windows |
 |---|---|
 | `bun install --frozen-lockfile`, `bun run typecheck`, `bun run build` | Passaram com Bun 1.3.3. A suíte HTTP iniciou o Nest a partir do build compilado. |
-| `bun run test:unit` | 21 passaram. Escala, precisão, regras de domínio, versões, ledger, conflito de hash, transições inválidas, eventos de integração, backoff da outbox e inbox. |
-| `bun run test:integration` | 6 passaram com PostgreSQL 17.7 nativo. Inclui rollback financeiro via savepoint e registro auditável de `FAILED` após falha permanente. |
+| `bun run test:unit` | 22 passaram. Escala, precisão, regras de domínio, versões, ledger, conflito de hash, transições inválidas, eventos de integração, backoff da outbox, inbox e taxonomia de falhas. |
+| `bun run test:integration` | 7 passaram com PostgreSQL 17.7 nativo, também em execução repetida no mesmo banco. Inclui rollback financeiro via savepoint, registro auditável de `FAILED` após falha permanente e rejeição auditada de moeda ou player divergente. |
 | `bun run test:concurrency` com MiniStack 1.1.10 | 9 cenários passaram com três processos, incluindo corrida HTTP/SQS, quedas da outbox, reentrega, rollback antes do commit, `FAILED` com replay e encaminhamento para DLQ. |
 | Docker Compose | YAML e dependências entre serviços verificados estaticamente. A CLI Docker e uma distribuição WSL estavam indisponíveis, então a inicialização dos contêineres ficou sem execução. |
 

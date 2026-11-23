@@ -1,10 +1,10 @@
 import { ChangeMessageVisibilityCommand, DeleteMessageCommand, GetQueueAttributesCommand, ReceiveMessageCommand,
   SendMessageCommand, SQSClient, type Message } from '@aws-sdk/client-sqs';
-import { hash, identifier, record, wagerFrom } from './contracts';
-import { type Database, query } from './database';
-import { DomainError, InboxMessage, OutboxMessage } from './domain';
-import { log, observe } from './observability';
-import type { Wagering } from './wagering';
+import { hash, identifier, record, wagerFrom } from '../../application/contracts';
+import type { UnitOfWork } from '../../application/ports';
+import type { Wagering } from '../../application/wagering';
+import { DomainError, InboxMessage } from '../../domain';
+import { log, observe } from '../observability';
 
 const maxReceives = 5;
 /** Inbox namespace of the wager-transactions consumer. */
@@ -45,7 +45,7 @@ export type WorkerHooks = {
 export class Workers {
   private readonly stop = new AbortController();
   private running: Promise<void>[] = [];
-  constructor(readonly db: Database, readonly queues: Queues, readonly wagering: Wagering,
+  constructor(readonly unitOfWork: UnitOfWork, readonly queues: Queues, readonly wagering: Wagering,
     private readonly hooks: WorkerHooks = {}) {}
 
   start(): void {
@@ -140,19 +140,16 @@ export class Workers {
       { abortSignal: AbortSignal.timeout(5000) });
   }
 
+  /**
+   * Publishes one due outbox message. The row lock is held only while sending it, so concurrent
+   * publishers split the work; a crash releases the lock and another instance resends the same eventId.
+   */
   async publishOne(): Promise<boolean> {
-    return this.db.em.fork().transactional(async em => {
-      const [row] = await query<{ id: string; aggregate_id: string; event_type: string; payload: Record<string, unknown>;
-        occurred_at: string | Date; attempts: number; next_attempt_at: string | Date; lag: number }>(em,
-        `select id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at,
-            extract(epoch from (now() - occurred_at))::float8 as lag
-          from outbox where published_at is null and next_attempt_at <= now()
-          order by next_attempt_at, id limit 1 for update skip locked`);
-      if (!row) return false;
-      const message = OutboxMessage.rehydrate({ id: row.id, aggregateId: row.aggregate_id, eventType: row.event_type,
-        payload: row.payload, occurredAt: new Date(row.occurred_at), attempts: row.attempts,
-        nextAttemptAt: new Date(row.next_attempt_at) });
-      observe('outbox_lag_seconds_sum', row.lag);
+    return this.unitOfWork.transaction(async scope => {
+      const claimed = await scope.outbox.claimNextDue();
+      if (!claimed) return false;
+      const { message, lagSeconds } = claimed;
+      observe('outbox_lag_seconds_sum', lagSeconds);
       observe('outbox_lag_seconds_count');
       try {
         this.hooks.beforePublish?.(message.id);
@@ -162,14 +159,13 @@ export class Workers {
         this.hooks.afterPublish?.(message.id);
       } catch {
         message.scheduleRetry(new Date());
-        await query(em, 'update outbox set attempts = ?, next_attempt_at = ? where id = ?',
-          [message.attempts, message.nextAttemptAt!.toISOString(), message.id]);
+        await scope.outbox.save(message);
         observe('outbox_retries_total');
         log('outbox_retry', { eventId: message.id, correlationId: message.payload.correlationId });
         return true;
       }
       message.markPublished(new Date());
-      await query(em, 'update outbox set published_at = ? where id = ?', [message.publishedAt!.toISOString(), message.id]);
+      await scope.outbox.save(message);
       return true;
     });
   }

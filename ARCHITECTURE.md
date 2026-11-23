@@ -24,7 +24,18 @@ O domínio fica em `src/domain/`, sem dependência de NestJS, MikroORM ou SQS. T
 
 `FailureCode` é um conjunto fechado de códigos. Uma regra de negócio violada lança `BusinessRuleViolation(code)`, e o caso de uso só converte esse tipo em `REJECTED`. Erros de entrada (`DomainError`) viram 400 sem persistência. Tentar mudar uma transação terminal lança `InvalidTransactionStateError`, que é erro de programação e não vira rejeição.
 
-Os casos de uso continuam em `src/wagering.ts` e escrevem SQL explícito. O domínio decide, e o adaptador persiste exatamente o estado que as entidades expõem.
+## Camadas e portas
+
+| Pasta | Conteúdo | Depende de |
+|---|---|---|
+| `src/domain` | Entidades, value objects, eventos, códigos de falha | nada |
+| `src/application` | Casos de uso (`OpenWallet`, `SubmitWagerTransaction`, `RetryPendingReference`, `WalletQueries`), o `TransactionProcessor` compartilhado, as portas em `ports.ts` e a validação dos contratos de entrada | domínio |
+| `src/infrastructure` | Adaptadores: repositórios SQL e `MikroOrmUnitOfWork` (`persistence/`), consumidor e publisher SQS (`messaging/`), controller NestJS (`http/`), telemetria e composição | aplicação e domínio |
+| `src/main.ts` | Raiz de composição | tudo |
+
+As portas são `UnitOfWork`, `TransactionScope` (repositórios de wallet, transação, ledger, inbox e outbox ligados a uma transação SQL, mais `savepoint`) e `Telemetry`. O caso de uso não conhece SQL, SQLSTATE nem MikroORM: a classificação de erros permanentes e de conflito de lock fica no `UnitOfWork`.
+
+**Uso do MikroORM.** O MikroORM fornece conexão, pool, migrations versionadas e a fronteira transacional: cada unidade de trabalho roda em `EntityManager.transactional()` sobre um `EntityManager` próprio (`fork()`), e o `savepoint` é um `transactional()` aninhado. Os repositórios usam SQL explícito pela conexão do próprio `EntityManager`, em vez de entidades gerenciadas pelo Identity Map. A escolha é deliberada: a correção depende de `FOR UPDATE`, `FOR UPDATE OF w SKIP LOCKED`, `ON CONFLICT DO NOTHING`, casts `::text` de `numeric` e condições que casam com os índices parciais, e o SQL deixa isso visível e revisável. O Identity Map também não agregaria aqui, porque cada transação lê e escreve uma wallet uma única vez sob lock. O custo é manter o mapeamento de linhas à mão, concentrado em `sql-repositories.ts`.
 
 ## Dinheiro e saldo
 
@@ -52,7 +63,28 @@ A chave fornecida é obrigatória e pertence ao namespace do provedor. `provider
 
 O hash SHA-256 da transação cobre `providerId`, `externalTransactionId`, `walletId`, `playerId`, `roundId`, `gameId`, `kind`, `money` e `referenceExternalTransactionId`. Ordenamos chaves recursivamente, convertemos UUIDs para minúsculas, normalizamos dinheiro para duas casas e representamos a referência ausente como `null`. Cabeçalhos, metadados de transporte e campos extras ficam fora do hash. O inbox usa separadamente o hash canônico do envelope inteiro para detectar divergências sob o mesmo `messageId`.
 
-`PENDING` nasce dentro da unidade de trabalho e pode ir a `PENDING_REFERENCE`, `PROCESSED`, `REJECTED` ou `FAILED`. `PENDING_REFERENCE` pode continuar pendente com novo prazo ou chegar a um estado terminal. Estados terminais não admitem transição. Uma referência ausente ou compatível e ainda pendente reentra com backoff de 1, 2, 4 segundos, até 60 segundos entre tentativas. A décima tentativa agendada sem uma referência processada grava `REFERENCE_EXPIRED` e evento de rejeição. Uma referência terminal sem sucesso gera `REFERENCE_NOT_PROCESSED`. Escopo, tipo e valor incompatíveis geram `REFERENCE_SCOPE_MISMATCH`, `INVALID_REFERENCE_KIND` e `REFERENCE_AMOUNT_MISMATCH`. As demais rejeições financeiras usam `ALREADY_REVERSED`, `INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS` e `AMOUNT_LIMIT`.
+`PENDING` nasce dentro da unidade de trabalho e pode ir a `PENDING_REFERENCE`, `PROCESSED`, `REJECTED` ou `FAILED`. `PENDING_REFERENCE` pode continuar pendente com novo prazo ou chegar a um estado terminal. Estados terminais não admitem transição. Uma referência ausente ou compatível e ainda pendente reentra com backoff de 1, 2, 4 segundos, até 60 segundos entre tentativas. A décima tentativa agendada sem uma referência processada grava `REFERENCE_EXPIRED` e evento de rejeição. Uma referência terminal sem sucesso gera `REFERENCE_NOT_PROCESSED`. Escopo, tipo e valor incompatíveis geram `REFERENCE_SCOPE_MISMATCH`, `INVALID_REFERENCE_KIND` e `REFERENCE_AMOUNT_MISMATCH`. As demais rejeições financeiras usam `ALREADY_REVERSED`, `INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS` e `AMOUNT_LIMIT`. Uma operação de outro player ou em outra moeda também é persistida como `REJECTED` (`PLAYER_WALLET_MISMATCH`, `CURRENCY_MISMATCH`), com evento de rejeição e sem ledger, para ficar auditável. O schema troca a FK composta por uma FK na wallet e um trigger que exige player e moeda da wallet em toda linha `PENDING_REFERENCE` ou `PROCESSED`.
+
+### Taxonomia de falhas
+
+Toda rejeição traz `failureCode` e `failureAction`. Reenviar a mesma idempotency key sempre devolve o resultado original, então "corrigir e reenviar" significa um novo `externalTransactionId` e uma nova chave.
+
+| `failureCode` | Status | `failureAction` | Significado |
+|---|---|---|---|
+| `INSUFFICIENT_FUNDS` | `REJECTED` / 422 | `DO_NOT_RETRY` | BET maior que o saldo |
+| `REVERSAL_INSUFFICIENT_FUNDS` | `REJECTED` / 422 | `CONTACT_OPERATOR` | ROLLBACK de WIN ou REFUND deixaria saldo negativo; exige tratamento operacional |
+| `ALREADY_REVERSED` | `REJECTED` / 422 | `DO_NOT_RETRY` | A referência já tem uma reversão aplicada |
+| `REFERENCE_EXPIRED` | `REJECTED` / 422 | `RESUBMIT_AFTER_REFERENCE` | A referência não chegou em 10 tentativas; envie a referência e depois uma nova reversão |
+| `REFERENCE_NOT_PROCESSED` | `REJECTED` / 422 | `DO_NOT_RETRY` | A referência terminou `REJECTED` ou `FAILED` |
+| `REFERENCE_SCOPE_MISMATCH` | `REJECTED` / 422 | `FIX_AND_RESUBMIT` | Provider, player, wallet, moeda ou rodada diferentes da referência |
+| `INVALID_REFERENCE_KIND` | `REJECTED` / 422 | `FIX_AND_RESUBMIT` | Tipo de referência não permitido para a operação |
+| `REFERENCE_AMOUNT_MISMATCH` | `REJECTED` / 422 | `FIX_AND_RESUBMIT` | Reversão com valor diferente da referência |
+| `CURRENCY_MISMATCH` | `REJECTED` / 422 | `FIX_AND_RESUBMIT` | Moeda da operação diferente da moeda da wallet |
+| `PLAYER_WALLET_MISMATCH` | `REJECTED` / 422 | `FIX_AND_RESUBMIT` | A wallet pertence a outro player |
+| `AMOUNT_LIMIT` | `REJECTED` / 422 | `DO_NOT_RETRY` | O saldo resultante excederia o limite representável |
+| `PERMANENT_PERSISTENCE_ERROR` | `FAILED` / 500 | `CONTACT_OPERATOR` | Falha determinística de escrita, auditável |
+
+Fora da taxonomia de transações: entrada inválida responde 400 com `{"error": CODIGO}` e não persiste nada (corrigir e reenviar); `WALLET_NOT_FOUND` e `TRANSACTION_NOT_FOUND` respondem 404; `IDEMPOTENCY_CONFLICT`, `EXTERNAL_ID_CONFLICT` e `INBOX_PAYLOAD_CONFLICT` respondem 409 (não reenviar com a mesma chave); 503 indica falha transitória e pode ser reenviado com a mesma chave.
 
 Replay retorna o estado atual da transação original e o saldo observado na entrada nesse estado. Uma nova tentativa que permanece pendente mantém o saldo observado anteriormente. Quando uma pendência chega ao terminal, o replay acompanha o novo estado e congela o resultado final mesmo após outras transações.
 
@@ -62,9 +94,9 @@ Falhas de conexão, locks, erros desconhecidos e erros externos ao savepoint ret
 
 ## Contratos e mensageria
 
-HTTP retorna 201 para abertura, 200 para consulta, reconciliação e apostas aplicadas, 202 para pendências, 400 para entrada inválida, 404 para entidade ausente, 409 para conflitos, 422 para rejeições auditadas e 503 para dependência indisponível. Erros de entrada usam `{"error":"CODIGO"}`. Respostas de transação seguem o contrato com `failureCode` quando aplicável.
+HTTP retorna 201 para abertura, 200 para consulta, reconciliação e apostas aplicadas, 202 para pendências, 400 para entrada inválida, 404 para entidade ausente, 409 para conflitos, 422 para rejeições auditadas e 503 para dependência indisponível. Erros de entrada usam `{"error":"CODIGO"}`. Respostas de transação seguem o contrato com `failureCode` e `failureAction` quando aplicável. Uma transição a partir de estado terminal (`InvalidTransactionStateError`) responde 500 `INTERNAL_ERROR`, porque é erro de programação e não indisponibilidade.
 
-SQS recebe de `wager-transactions.fifo` e envia mensagens inválidas ou esgotadas a `wager-transactions-dlq.fifo`. O consumidor só faz ack após o commit e grava o inbox dentro da mesma transação com wager, saldo, ledger e outbox. As rejeições auditadas também fazem commit e ack.
+SQS recebe de `wager-transactions.fifo`. O consumidor só faz ack após o commit e grava o inbox dentro da mesma transação com wager, saldo, ledger e outbox. Erros de negócio terminam como `REJECTED` auditado, com commit e ack. Erros permanentes vão para `wager-transactions-dlq.fifo` com o código no atributo `failureCode`: envelope ou payload inválido, wallet inexistente, conflitos de idempotência e `FAILED`. Falhas transitórias voltam à fila com backoff até o limite de entregas.
 
 O publisher usa `FOR UPDATE SKIP LOCKED` para dividir trabalho. Mantém o lock apenas sobre uma linha da outbox durante um envio com prazo curto e grava o sucesso depois. Uma queda encerra a transação e libera o lock. Falhas de envio mantêm o evento e adiam a próxima tentativa com backoff. A fila de saída `wager-events` é standard e permite entregas repetidas e fora de ordem. O consumidor de eventos deve deduplicar por `eventId` e confirmar o ID junto ao próprio efeito. Os eventos têm versão, aggregateId, correlationId, causationId quando aplicável, data ISO e valores monetários em DTO.
 

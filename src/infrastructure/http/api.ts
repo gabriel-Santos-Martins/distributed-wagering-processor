@@ -1,14 +1,15 @@
-import { ArgumentsHost, Body, Catch, Controller, ExceptionFilter, Get, Headers, HttpException,
+import { ArgumentsHost, Body, Catch, Controller, ExceptionFilter, Get, Headers, HttpException, Inject,
   Injectable, Module, Param, Post, Query, Res, type DynamicModule } from '@nestjs/common';
-import { identifier, moneyFrom, record, uuid, wagerFrom } from './contracts';
-import { query, type Database } from './database';
-import { DomainError } from './domain';
-import { Queues } from './messaging';
-import { log, metricSnapshot } from './observability';
-import { Wagering } from './wagering';
+import { identifier, moneyFrom, record, uuid, wagerFrom } from '../../application/contracts';
+import { Wagering } from '../../application/wagering';
+import { DomainError, InvalidTransactionStateError } from '../../domain';
+import { Queues } from '../messaging/sqs';
+import { log, metricSnapshot } from '../observability';
+import { query, type Database } from '../persistence/database';
 
 type Response = { status(code: number): Response; json(body: unknown): void };
 const statusCodes = { PROCESSED: 200, PENDING: 202, PENDING_REFERENCE: 202, REJECTED: 422, FAILED: 500 };
+const DATABASE = Symbol('Database');
 
 @Injectable()
 export class ProviderIdentity {
@@ -19,7 +20,7 @@ export class ProviderIdentity {
 @Controller()
 class Api {
   constructor(private readonly wagering: Wagering, private readonly queues: Queues,
-    private readonly identity: ProviderIdentity) {}
+    private readonly identity: ProviderIdentity, @Inject(DATABASE) private readonly db: Database) {}
 
   @Post('wallets')
   open(@Body() raw: unknown) {
@@ -79,7 +80,7 @@ class Api {
   @Get('health/ready')
   async ready() {
     try {
-      await Promise.all([query(this.wagering.db.em.fork(), 'select 1 from wallet limit 1'), this.queues.ready()]);
+      await Promise.all([query(this.db.em.fork(), 'select 1 from wallet limit 1'), this.queues.ready()]);
       return { status: 'ok' };
     } catch { throw new DomainError('DEPENDENCY_UNAVAILABLE', 503); }
   }
@@ -96,6 +97,10 @@ export class HttpErrors implements ExceptionFilter {
       response.status(error.httpStatus).json({ error: error.code });
     } else if (error instanceof HttpException) {
       response.status(error.getStatus()).json({ error: error.getStatus() === 400 ? 'INVALID_PAYLOAD' : 'HTTP_ERROR' });
+    } else if (error instanceof InvalidTransactionStateError) {
+      // A programming error, not a dependency outage: retrying will not help.
+      log('http_error', { errorType: error.name, transactionId: error.transactionId });
+      response.status(500).json({ error: 'INTERNAL_ERROR' });
     } else {
       log('http_error', { errorType: error instanceof Error ? error.name : 'UnknownError' });
       response.status(503).json({ error: 'SERVICE_UNAVAILABLE' });
@@ -105,11 +110,12 @@ export class HttpErrors implements ExceptionFilter {
 
 @Module({})
 export class ApiModule {
-  static register(db: Database, queues: Queues): DynamicModule {
+  static register(db: Database, queues: Queues, wagering: Wagering): DynamicModule {
     return { module: ApiModule, controllers: [Api], providers: [
       ProviderIdentity,
-      { provide: Wagering, useValue: new Wagering(db) },
+      { provide: Wagering, useValue: wagering },
       { provide: Queues, useValue: queues },
+      { provide: DATABASE, useValue: db },
     ] };
   }
 }

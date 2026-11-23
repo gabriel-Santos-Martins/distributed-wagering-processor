@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { DomainError, externalKinds, Money, type ExternalKind, type WagerInput } from './domain';
+import { DomainError, externalKinds, Money, type ExternalKind, type WagerInput } from '../domain';
 
 export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new DomainError('INVALID_PAYLOAD');
