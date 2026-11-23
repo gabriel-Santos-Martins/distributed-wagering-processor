@@ -34,6 +34,13 @@ export class Queues {
       new GetQueueAttributesCommand({ QueueUrl, AttributeNames: ['QueueArn'] }),
       { abortSignal: AbortSignal.timeout(3000) })));
   }
+
+  /** Messages in the DLQ as the broker reports them, including those moved by its own redrive policy. */
+  async dlqDepth(): Promise<number> {
+    const { Attributes } = await this.client.send(new GetQueueAttributesCommand({ QueueUrl: this.dlq,
+      AttributeNames: ['ApproximateNumberOfMessages'] }), { abortSignal: AbortSignal.timeout(3000) });
+    return Number(Attributes?.ApproximateNumberOfMessages ?? 0);
+  }
 }
 
 export type WorkerHooks = {

@@ -18,8 +18,10 @@ Ao rodar a aplicação no host, configure `DATABASE_URL`, `SQS_ENDPOINT` e `PORT
 
 ## Console web local
 
-Com a API NestJS em execução, rode `bun run frontend` e acesse
-`http://127.0.0.1:3100`. O console usa React, TanStack Query, TypeScript,
+O console é opcional e não faz parte do desafio nem da imagem do backend. Ele
+tem dependências próprias em `frontend/package.json`. Instale uma vez com
+`bun run frontend:install`; depois, com a API NestJS em execução, rode
+`bun run frontend` e acesse `http://127.0.0.1:3100`. O console usa React, TanStack Query, TypeScript,
 Tailwind CSS 3, Radix e fontes Geist. O Bun serve o frontend e encaminha as
 rotas da API na mesma origem. Os padrões são `FRONTEND_PORT=3100` e
 `WAGER_API_URL=http://127.0.0.1:3000`.
@@ -60,8 +62,28 @@ Para repetir apenas os cenários HTTP e PostgreSQL da suíte de concorrência, d
 | `bun install --frozen-lockfile`, `bun run typecheck`, `bun run build` | Passaram com Bun 1.3.3. A suíte HTTP iniciou o Nest a partir do build compilado. |
 | `bun run test:unit` | 22 passaram. Escala, precisão, regras de domínio, versões, ledger, conflito de hash, transições inválidas, eventos de integração, backoff da outbox, inbox e taxonomia de falhas. |
 | `bun run test:integration` | 7 passaram com PostgreSQL 17.7 nativo, também em execução repetida no mesmo banco. Inclui rollback financeiro via savepoint, registro auditável de `FAILED` após falha permanente e rejeição auditada de moeda ou player divergente. |
-| `bun run test:concurrency` com MiniStack 1.1.10 | 9 cenários passaram com três processos, incluindo corrida HTTP/SQS, quedas da outbox, reentrega, rollback antes do commit, `FAILED` com replay e encaminhamento para DLQ. |
+| `bun run test:concurrency` com MiniStack 1.1.10 | 10 cenários passaram com três processos, incluindo corrida HTTP/SQS, 20 wallets com 120 BETs concorrentes, quedas da outbox, reentrega, rollback antes do commit, `FAILED` com replay e encaminhamento para DLQ. |
 | Docker Compose | YAML e dependências entre serviços verificados estaticamente. A CLI Docker e uma distribuição WSL estavam indisponíveis, então a inicialização dos contêineres ficou sem execução. |
+
+### Teste de carga
+
+`bun run test:load` dispara contra instâncias já em execução. Parâmetros por variável de ambiente: `LOAD_TARGETS` (URLs separadas por vírgula), `LOAD_WALLETS`, `LOAD_CONCURRENCY`, `LOAD_DURATION_SECONDS`, `LOAD_HOT_WALLET_SHARE` e `LOAD_DUPLICATE_SHARE`.
+
+**Metodologia.** O script abre as wallets com saldo alto. Depois, N clientes fecham laços de requisição por D segundos, distribuídos entre as instâncias: 80% BET de 1.00, 10% WIN e 10% LOSS. 20% do tráfego vai para uma única wallet quente, e 5% repete um pedido anterior com a mesma chave (replay). O script amostra os gauges da outbox a cada segundo, mede quanto tempo a outbox leva para esvaziar depois da carga, soma `lock_conflicts_total` das instâncias e reconcilia todas as wallets no fim.
+
+**Resultado de referência** (23/11/2026; Windows 11, Intel i5-8500 com 6 núcleos; Bun 1.3.3, PostgreSQL 17.7 embarcado, MiniStack 1.1.10; três instâncias, banco, broker e gerador de carga na mesma máquina; 50 wallets, 32 clientes, 30 s):
+
+| Métrica | Valor |
+|---|---|
+| Requisições | 10.531, todas 200 |
+| Throughput | 349 req/s |
+| Latência p50 / p95 / p99 / máx | 43 / 384 / 888 / 2.523 ms |
+| Taxa de erro | 0% (sem erros de transporte, 5xx ou 409) |
+| Conflitos de lock (timeout ou deadlock) | 0 |
+| Outbox | pico de 11.946 eventos pendentes, mais antigo com 18,3 s; esvaziou 16,6 s após a carga |
+| Reconciliação | 50 de 50 wallets consistentes |
+
+**Leitura honesta.** A cauda de latência vem principalmente da wallet quente: 20% das requisições disputam o mesmo lock de linha e são serializadas, como o desenho exige. Nenhuma espera chegou ao `lock_timeout` de 5 s. A outbox é o gargalo: cada transação gera dois eventos, e cada publisher envia um evento por transação SQL, então o atraso de publicação cresceu durante o teste. Envio em lote (`SendMessageBatch`) e mais publishers reduziriam esse atraso. Os números valem só como ordem de grandeza: tudo dividiu os mesmos 6 núcleos, e o MiniStack é um emulador.
 
 ## Exemplos
 
@@ -90,7 +112,7 @@ A primeira BET devolve saldo `20.00`. O mesmo pedido repetido preserva o ID, sta
 | GET | `/providers/:providerId/wagering/transactions/:externalTransactionId` | Estado por identidade externa |
 | POST | `/wallets/:walletId/reconciliation` | Saldo gravado, saldo calculado e diferença |
 | GET | `/health/live`, `/health/ready` | Processo e dependências |
-| GET | `/metrics` | Contadores e somas locais do processo |
+| GET | `/metrics` | `counters` do processo e `gauges` de outbox, referências pendentes e DLQ |
 
 Uma mensagem segue o envelope `{"messageId":"msg-123","type":"WagerTransactionRequested","occurredAt":"2026-07-29T15:00:00.000Z","data":{...}}`. Use o mesmo corpo HTTP dentro de `data` e acrescente `idempotencyKey`. Para ordenação por wallet, use o UUID da wallet como `MessageGroupId`. O `MessageDeduplicationId` do SQS é independente da chave persistente de negócio.
 

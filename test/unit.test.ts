@@ -158,8 +158,12 @@ test('transitions permit a pending reference to complete and forbid all terminal
 });
 
 test('canonical business hash normalizes Money and detects divergent payload under one key', () => {
-  const input = wagerFrom({ ...template, money: { amount: '08.0', currency: 'BRL' } });
+  const input = wagerFrom({ ...template, money: { amount: '8.00', currency: 'BRL' } });
   expect(wagerHash(input)).toBe(wagerHash(template));
+  expect(wagerHash({ ...template, money: brl('8.0') })).toBe(wagerHash(template));
+  for (const amount of ['8', '8.0', '08.00', '8.000', '-8.00', ' 8.00']) {
+    expect(() => wagerFrom({ ...template, money: { amount, currency: 'BRL' } })).toThrow('INVALID_MONEY');
+  }
   const original = wager({});
   expect(original.matchesPayload(wagerHash(template))).toBe(true);
   expect(original.matchesPayload(wagerHash({ ...template, money: brl('8.01') }))).toBe(false);

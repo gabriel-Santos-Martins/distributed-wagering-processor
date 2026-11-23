@@ -18,9 +18,14 @@ export function uuid(value: unknown): string {
   return id.toLowerCase();
 }
 
+/** Contract amounts use a fixed scale of two decimals and no leading zeros: "25.00", "0.50". */
+const contractAmount = /^(?:0|[1-9]\d{0,15})\.\d{2}$/;
+
 export function moneyFrom(value: unknown): Money {
   const { amount, currency } = record(value);
-  if (typeof amount !== 'string' || typeof currency !== 'string') throw new DomainError('INVALID_MONEY');
+  if (typeof amount !== 'string' || typeof currency !== 'string' || !contractAmount.test(amount)) {
+    throw new DomainError('INVALID_MONEY');
+  }
   return Money.from({ amount, currency });
 }
 

@@ -179,6 +179,22 @@ test('two BETs compete for 100.00; an independently locked wallet does not block
   await checkLedger(db, b.walletId, '20.00');
 }, 15000);
 
+test('20 wallets take 6 competing BETs each, all in parallel across three processes', async () => {
+  const { db } = connection;
+  const wallets = await Promise.all(Array.from({ length: 20 }, (_, i) => fixture('100.00', ports[i % ports.length])));
+  // 120 concurrent requests: per wallet, six BETs of 20.00 race for 100.00.
+  const results = await Promise.all(wallets.flatMap(({ wager }, w) => Array.from({ length: 6 }, (_, b) =>
+    request(ports[(w + b) % ports.length], submitPath, wager(`bet-${b}`, '20'), `bet-${b}`))));
+  expect(results.every(result => result.status === 200 || result.status === 422)).toBe(true);
+  for (const [index, { walletId }] of wallets.entries()) {
+    const own = results.slice(index * 6, index * 6 + 6);
+    expect(own.filter(result => result.status === 200)).toHaveLength(5);
+    expect(own.filter(result => result.status === 422).map(result => result.body.failureCode))
+      .toEqual(['INSUFFICIENT_FUNDS']);
+    expect(debitCount(await checkLedger(db, walletId, '0.00'))).toBe(5);
+  }
+}, 30000);
+
 test('out-of-order REFUND reaches PROCESSED and pending replay advances to final outcome', async () => {
   const { db, queues } = connection;
   const { walletId, wager } = await fixture();
@@ -209,7 +225,7 @@ brokerTest('crash after commit before ack triggers broker redelivery and inbox d
   await checkLedger(db, wallet.id, '20.00');
   await cluster();
   await eventually(async () => Promise.all(ports.map(port => request(port, '/metrics'))),
-    results => results.some(result => result.body.inbox_duplicates_total >= 1), 75000);
+    results => results.some(result => result.body.counters.inbox_duplicates_total >= 1), 75000);
   expect(await query(db.em.fork(), 'select 1 from inbox where message_id = ? and processed_at is not null', [messageId]))
     .toHaveLength(1);
   expect(debitCount(await checkLedger(db, wallet.id, '20.00'))).toBe(1);
@@ -271,7 +287,7 @@ brokerTest('permanent malformed input reaches DLQ; transient SQL failure backs o
     await query(context, 'select id from wallet where id = ? for update', [walletId]);
     const id = await send(queues, walletId, { ...wager('retry'), idempotencyKey: 'retry' });
     await eventually(async () => Promise.all(ports.map(port => request(port, '/metrics'))),
-      result => result.some(response => response.body.message_retries_total >= 1), 10000);
+      result => result.some(response => response.body.counters.message_retries_total >= 1), 10000);
     return id;
   });
   await eventually(() => query(em, 'select 1 from inbox where message_id = ?', [pending]), value => value.length === 1);
@@ -285,7 +301,7 @@ brokerTest('a pre-commit outbox fault rolls back the SQS inbox and redelivery co
   const em = db.em.fork();
   const messageId = randomUUID();
   const retries = async () => (await Promise.all(ports.map(port => request(port, '/metrics'))))
-    .reduce((total, response) => total + (response.body.message_retries_total ?? 0), 0);
+    .reduce((total, response) => total + (response.body.counters.message_retries_total ?? 0), 0);
   const initialRetries = await retries();
   await query(em, `create function test_fail_sqs_balance_event() returns trigger language plpgsql as $$
     begin raise exception 'injected SQS outbox failure'; end $$;

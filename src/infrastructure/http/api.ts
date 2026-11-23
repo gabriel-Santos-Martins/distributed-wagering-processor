@@ -85,8 +85,29 @@ class Api {
     } catch { throw new DomainError('DEPENDENCY_UNAVAILABLE', 503); }
   }
 
+  /**
+   * Counters are per process. Gauges are read from PostgreSQL and the broker at scrape time, so outbox lag
+   * keeps growing even when no publisher is running.
+   */
   @Get('metrics')
-  metrics() { return metricSnapshot(); }
+  async metrics() {
+    const [database, dlq] = await Promise.allSettled([
+      query<{ outbox_pending: number; outbox_oldest_pending_seconds: number; pending_references: number }>(
+        this.db.em.fork(), `select
+          (select count(*)::int from outbox where published_at is null) as outbox_pending,
+          (select coalesce(extract(epoch from now() - min(occurred_at)), 0)::float8
+             from outbox where published_at is null) as outbox_oldest_pending_seconds,
+          (select count(*)::int from wager where status = 'PENDING_REFERENCE') as pending_references`),
+      this.queues.dlqDepth(),
+    ]);
+    return {
+      counters: metricSnapshot(),
+      gauges: {
+        ...(database.status === 'fulfilled' ? database.value[0] : { database_unavailable: 1 }),
+        ...(dlq.status === 'fulfilled' ? { dlq_messages: dlq.value } : { broker_unavailable: 1 }),
+      },
+    };
+  }
 }
 
 @Catch()

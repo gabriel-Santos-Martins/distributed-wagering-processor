@@ -122,12 +122,16 @@ test('a transaction is reversed at most once across kinds; historical replay and
     status: 'REJECTED', failureCode: 'ALREADY_REVERSED' });
   expect(await submit('bet', 'BET', '60')).toMatchObject({ transactionId: bet!.transactionId,
     idempotentReplay: true, balance: dto('40.00') });
-  expect((await submit('win', 'WIN', '50', 'bet'))?.status).toBe('PROCESSED');
-  expect((await submit('spend', 'BET', '80'))?.status).toBe('PROCESSED');
+  // A WIN cannot settle a BET that was already reversed.
+  expect(await submit('win-reversed-bet', 'WIN', '50', 'bet')).toMatchObject({
+    status: 'REJECTED', failureCode: 'ALREADY_REVERSED', balance: dto('40.00') });
+  expect((await submit('bet-2', 'BET', '30'))?.balance).toEqual(dto('10.00'));
+  expect((await submit('win', 'WIN', '50', 'bet-2'))?.balance).toEqual(dto('60.00'));
+  expect((await submit('spend', 'BET', '55'))?.status).toBe('PROCESSED');
   expect(await submit('rollback-win', 'ROLLBACK', '50', 'win')).toMatchObject({
     status: 'REJECTED', failureCode: 'REVERSAL_INSUFFICIENT_FUNDS' });
   expect(await submit('loss', 'LOSS', '0')).toMatchObject({ status: 'PROCESSED' });
-  expect(await checkLedger(db, wallet.id, '10.00')).toHaveLength(6);
+  expect(await checkLedger(db, wallet.id, '5.00')).toHaveLength(7);
 });
 
 test('another currency or player is persisted as an auditable rejection without touching the wallet', async () => {

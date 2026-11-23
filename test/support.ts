@@ -5,7 +5,11 @@ import { connect, query, type Database } from '../src/infrastructure/persistence
 import { Queues } from '../src/infrastructure/messaging/sqs';
 
 export const baseUrl = (port: number) => 'http://127.0.0.1:' + port;
-export const dto = (amount: string) => ({ amount, currency: 'BRL' });
+/** Contract money in BRL, normalized to the fixed two-decimal scale ("80" becomes "80.00"). */
+export const dto = (amount: string) => {
+  const [whole, fraction = ''] = amount.split('.');
+  return { amount: `${whole}.${fraction.padEnd(2, '0')}`, currency: 'BRL' };
+};
 export const ids = () => ({ providerId: 'provider-' + randomUUID(), playerId: randomUUID() });
 
 export async function setup(requireQueues = true) {

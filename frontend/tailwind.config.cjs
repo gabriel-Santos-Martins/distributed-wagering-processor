@@ -1,1 +1,1 @@
-module.exports = { content: ['./frontend/index.html', './frontend/**/*.tsx'] };
+module.exports = { content: ['./index.html', './main.tsx', './api.ts'] };

@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQue
 import * as Dialog from '@radix-ui/react-dialog';
 import { Activity, ArrowDownLeft, ArrowLeftRight, ArrowUpRight, BadgeCheck, ChevronRight, CircleHelp, ClipboardCheck,
   Copy, Database, LayoutDashboard, List, Plus, RefreshCw, Search, Wallet as WalletIcon, X } from 'lucide-react';
-import { api, failureLabels, formatMoney, statusLabels, type Entry, type Kind, type Ledger, type Reconciliation,
+import { api, contractAmount, failureLabels, formatMoney, statusLabels, type Entry, type Kind, type Ledger, type Reconciliation,
   type Transaction, type Wager, type Wallet } from './api';
 import './generated.css';
 
@@ -75,7 +75,7 @@ function WagerForm({ wallet, submit, busy, error, result }: { wallet: Wallet; su
     submit({
       walletId: wallet.id, playerId: wallet.playerId, providerId, externalTransactionId, kind,
       roundId: value('round'), gameId: value('game'),
-      money: { amount: value('amount').replace(',', '.'), currency: wallet.balance.currency },
+      money: { amount: contractAmount(value('amount')), currency: wallet.balance.currency },
       ...(reference ? { referenceExternalTransactionId: reference } : {}),
     }, value('key') || providerId + ':' + externalTransactionId);
   }
@@ -262,7 +262,7 @@ function App() {
     {modal === 'wallet' && <ModalForm title="Nova carteira" description="Crie uma carteira de teste para um jogador." close={() => setModal(null)}>
       <form className="form" onSubmit={event => {
         event.preventDefault(); const form = new FormData(event.currentTarget);
-        createWallet.mutate({ playerId: String(form.get('player')).trim(), initialBalance: { amount: String(form.get('amount')).trim().replace(',', '.'), currency: String(form.get('currency')).trim().toUpperCase() } });
+        createWallet.mutate({ playerId: String(form.get('player')).trim(), initialBalance: { amount: contractAmount(String(form.get('amount'))), currency: String(form.get('currency')).trim().toUpperCase() } });
       }}>
         <Field name="player" label="ID do jogador" initial={newPlayerId} />
         <div className="form-grid"><Field name="amount" label="Saldo inicial" initial="100.00"/><Field name="currency" label="Moeda" initial="BRL"/></div>

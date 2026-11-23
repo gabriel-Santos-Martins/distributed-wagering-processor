@@ -61,8 +61,9 @@ export class TransactionProcessor {
         else transaction.markPendingReference();
       } else {
         transaction.assertReference(reference);
-        if (transaction.requiresReference() && await scope.transactions.hasProcessedReversal(reference!.id)) {
-          // One reversal per referenced transaction: REFUND and ROLLBACK of the same BET would credit it twice.
+        // One reversal per referenced transaction: REFUND and ROLLBACK of the same BET would credit it twice.
+        // A WIN cannot settle a BET that was already reversed either.
+        if (reference && await scope.transactions.hasProcessedReversal(reference.id)) {
           throw new BusinessRuleViolation(FailureCode.AlreadyReversed);
         }
         if (transaction.affectsBalance()) entry = this.move(transaction, wallet, reference, now);

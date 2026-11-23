@@ -10,7 +10,7 @@ export type Wager = { providerId: string; externalTransactionId: string; walletI
 const descriptions: Record<string, string> = {
   WALLET_NOT_FOUND: 'Carteira não encontrada.',
   WALLET_EXISTS: 'Já existe uma carteira para este jogador e moeda.',
-  INVALID_MONEY: 'Informe um valor decimal com até duas casas.',
+  INVALID_MONEY: 'Informe um valor decimal com duas casas, por exemplo 10.00.',
   API_INDISPONIVEL: 'A API local está indisponível.',
   DEPENDENCY_UNAVAILABLE: 'A API está em execução, mas uma dependência está indisponível.',
   IDEMPOTENCY_CONFLICT: 'Esta chave de idempotência já pertence a outro pedido.',
@@ -33,6 +33,15 @@ export async function api<T>(path: string, options?: { body: unknown; key?: stri
   return result;
 }
 
+/** Brings typed input to the contract scale: "10" or "10,5" becomes "10.00" or "10.50". Invalid input passes through. */
+export function contractAmount(input: string): string {
+  const value = input.trim().replace(',', '.');
+  const match = /^(\d+)(?:\.(\d{0,2}))?$/.exec(value);
+  if (!match) return value;
+  const whole = match[1].replace(/^0+(?=\d)/, '');
+  return whole + '.' + (match[2] ?? '').padEnd(2, '0');
+}
+
 export function formatMoney({ amount, currency }: Money) {
   const negative = amount.startsWith('-');
   const [integer, fraction] = amount.replace(/^-/, '').split('.');
@@ -48,8 +57,14 @@ export const statusLabels: Record<string, string> = {
 export const failureLabels: Record<string, string> = {
   INSUFFICIENT_FUNDS: 'Saldo insuficiente para a aposta.',
   REVERSAL_INSUFFICIENT_FUNDS: 'Saldo insuficiente para a reversão.',
-  ALREADY_REVERSED: 'A transação já foi revertida por esse tipo.',
+  ALREADY_REVERSED: 'A transação de referência já foi revertida.',
   REFERENCE_EXPIRED: 'O prazo de espera pela referência expirou.',
   REFERENCE_NOT_PROCESSED: 'A transação de referência não foi processada.',
+  REFERENCE_SCOPE_MISMATCH: 'A referência pertence a outro provedor, jogador, carteira, moeda ou rodada.',
+  INVALID_REFERENCE_KIND: 'Este tipo de operação não pode referenciar essa transação.',
+  REFERENCE_AMOUNT_MISMATCH: 'O valor da reversão difere do valor da referência.',
+  CURRENCY_MISMATCH: 'A moeda da operação difere da moeda da carteira.',
+  PLAYER_WALLET_MISMATCH: 'A carteira pertence a outro jogador.',
+  AMOUNT_LIMIT: 'O saldo resultante excederia o limite permitido.',
   PERMANENT_PERSISTENCE_ERROR: 'Uma falha permanente de persistência impediu a movimentação.',
 };
