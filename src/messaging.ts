@@ -2,12 +2,13 @@ import { ChangeMessageVisibilityCommand, DeleteMessageCommand, GetQueueAttribute
   SendMessageCommand, SQSClient, type Message } from '@aws-sdk/client-sqs';
 import { hash, identifier, record, wagerFrom } from './contracts';
 import { type Database, query } from './database';
-import { DomainError } from './domain';
-import { InboxMessage } from './events';
+import { DomainError, InboxMessage, OutboxMessage } from './domain';
 import { log, observe } from './observability';
 import type { Wagering } from './wagering';
 
 const maxReceives = 5;
+/** Inbox namespace of the wager-transactions consumer. */
+export const consumerName = 'wagering';
 const pause = (ms: number, signal: AbortSignal) => new Promise<void>(resolve => {
   if (signal.aborted) { resolve(); return; }
   const done = () => {
@@ -106,7 +107,7 @@ export class Workers {
       const input = wagerFrom(data);
       ({ providerId, walletId } = input);
       const result = await this.wagering.submit(input, identifier(data.idempotencyKey, 'IDEMPOTENCY_KEY_REQUIRED'),
-        InboxMessage.receive(messageId, hash(raw)));
+        InboxMessage.receive({ messageId, consumerName, payloadHash: hash(raw) }));
       if (result?.status === 'FAILED') throw new DomainError(result.failureCode!, 500);
     } catch (error) {
       if (error instanceof DomainError || count >= maxReceives) {
@@ -141,28 +142,34 @@ export class Workers {
 
   async publishOne(): Promise<boolean> {
     return this.db.em.fork().transactional(async em => {
-      const [row] = await query<{ id: string; payload: Record<string, unknown>; attempts: number; lag: number }>(em,
-        `select id, payload, attempts, extract(epoch from (now() - occurred_at))::float8 as lag
+      const [row] = await query<{ id: string; aggregate_id: string; event_type: string; payload: Record<string, unknown>;
+        occurred_at: string | Date; attempts: number; next_attempt_at: string | Date; lag: number }>(em,
+        `select id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at,
+            extract(epoch from (now() - occurred_at))::float8 as lag
           from outbox where published_at is null and next_attempt_at <= now()
           order by next_attempt_at, id limit 1 for update skip locked`);
       if (!row) return false;
+      const message = OutboxMessage.rehydrate({ id: row.id, aggregateId: row.aggregate_id, eventType: row.event_type,
+        payload: row.payload, occurredAt: new Date(row.occurred_at), attempts: row.attempts,
+        nextAttemptAt: new Date(row.next_attempt_at) });
       observe('outbox_lag_seconds_sum', row.lag);
       observe('outbox_lag_seconds_count');
       try {
-        this.hooks.beforePublish?.(row.id);
+        this.hooks.beforePublish?.(message.id);
         await this.queues.client.send(new SendMessageCommand({
-          QueueUrl: this.queues.events, MessageBody: JSON.stringify(row.payload),
+          QueueUrl: this.queues.events, MessageBody: JSON.stringify(message.payload),
         }), { abortSignal: AbortSignal.timeout(5000) });
-        this.hooks.afterPublish?.(row.id);
+        this.hooks.afterPublish?.(message.id);
       } catch {
-        await query(em, `update outbox set attempts = attempts + 1,
-          next_attempt_at = now() + ?::int * interval '1 second' where id = ?`,
-          [2 ** Math.min(row.attempts, 8), row.id]);
+        message.scheduleRetry(new Date());
+        await query(em, 'update outbox set attempts = ?, next_attempt_at = ? where id = ?',
+          [message.attempts, message.nextAttemptAt!.toISOString(), message.id]);
         observe('outbox_retries_total');
-        log('outbox_retry', { eventId: row.id, correlationId: row.payload.correlationId });
+        log('outbox_retry', { eventId: message.id, correlationId: message.payload.correlationId });
         return true;
       }
-      await query(em, 'update outbox set published_at = now() where id = ?', [row.id]);
+      message.markPublished(new Date());
+      await query(em, 'update outbox set published_at = ? where id = ?', [message.publishedAt!.toISOString(), message.id]);
       return true;
     });
   }

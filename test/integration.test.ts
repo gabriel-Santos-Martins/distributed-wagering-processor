@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { query } from '../src/database';
-import { InboxMessage } from '../src/events';
+import { InboxMessage } from '../src/domain';
 import { wagerFrom, hash } from '../src/contracts';
 import { Money } from '../src/domain';
 import { Wagering } from '../src/wagering';
@@ -69,7 +69,7 @@ test('outbox failure rolls back financial state and inbox; committed retry and i
     create trigger test_fail_balance_event before insert on outbox for each row
     when (new.event_type = 'WalletBalanceChanged' and new.aggregate_id = ?) execute function test_fail_balance_event()`, [wallet.id]);
   try {
-    const failure = await api.submit(input, 'bet', InboxMessage.receive(messageId, hash('same'))).catch(error => error);
+    const failure = await api.submit(input, 'bet', InboxMessage.receive({ messageId, consumerName: 'wagering', payloadHash: hash('same') })).catch(error => error);
     expect(failure).toBeInstanceOf(Error);
     expect(failure.code).toBe('P0001');
     expect(await query(em, 'select 1 from inbox where message_id = ?', [messageId])).toEqual([]);
@@ -78,10 +78,10 @@ test('outbox failure rolls back financial state and inbox; committed retry and i
   } finally {
     await query(em, 'drop trigger test_fail_balance_event on outbox; drop function test_fail_balance_event()');
   }
-  const result = await api.submit(input, 'bet', InboxMessage.receive(messageId, hash('same')));
+  const result = await api.submit(input, 'bet', InboxMessage.receive({ messageId, consumerName: 'wagering', payloadHash: hash('same') }));
   expect(result?.status).toBe('PROCESSED');
-  expect(await api.submit(input, 'bet', InboxMessage.receive(messageId, hash('same')))).toBeNull();
-  const inboxConflict = await api.submit(input, 'bet', InboxMessage.receive(messageId, hash('different'))).catch(error => error);
+  expect(await api.submit(input, 'bet', InboxMessage.receive({ messageId, consumerName: 'wagering', payloadHash: hash('same') }))).toBeNull();
+  const inboxConflict = await api.submit(input, 'bet', InboxMessage.receive({ messageId, consumerName: 'wagering', payloadHash: hash('different') })).catch(error => error);
   const externalConflict = await api.submit(input, 'other-key').catch(error => error);
   expect(inboxConflict).toMatchObject({ code: 'INBOX_PAYLOAD_CONFLICT' });
   expect(externalConflict).toMatchObject({ code: 'EXTERNAL_ID_CONFLICT' });

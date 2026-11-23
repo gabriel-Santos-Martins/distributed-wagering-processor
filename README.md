@@ -58,7 +58,7 @@ Para repetir apenas os cenários HTTP e PostgreSQL da suíte de concorrência, d
 | Comando ou requisito | Resultado no Windows |
 |---|---|
 | `bun install --frozen-lockfile`, `bun run typecheck`, `bun run build` | Passaram com Bun 1.3.3. A suíte HTTP iniciou o Nest a partir do build compilado. |
-| `bun run test:unit` | 17 passaram. Escala, precisão, regras de domínio, versões, ledger e conflito de hash. |
+| `bun run test:unit` | 21 passaram. Escala, precisão, regras de domínio, versões, ledger, conflito de hash, transições inválidas, eventos de integração, backoff da outbox e inbox. |
 | `bun run test:integration` | 6 passaram com PostgreSQL 17.7 nativo. Inclui rollback financeiro via savepoint e registro auditável de `FAILED` após falha permanente. |
 | `bun run test:concurrency` com MiniStack 1.1.10 | 9 cenários passaram com três processos, incluindo corrida HTTP/SQS, quedas da outbox, reentrega, rollback antes do commit, `FAILED` com replay e encaminhamento para DLQ. |
 | Docker Compose | YAML e dependências entre serviços verificados estaticamente. A CLI Docker e uma distribuição WSL estavam indisponíveis, então a inicialização dos contêineres ficou sem execução. |

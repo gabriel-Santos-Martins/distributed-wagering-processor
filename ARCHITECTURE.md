@@ -2,11 +2,29 @@
 
 ## Fluxo e escopo
 
-O módulo Nest compõe o adaptador HTTP, a identidade do provedor e o caso de uso. O consumidor SQS usa as mesmas validações de contrato e invoca o mesmo caso de uso. As classes de domínio usam TypeScript puro e factories de criação e reidratação. A aplicação coordena as operações com o `EntityManager.transactional()` do MikroORM. Consultas SQL explícitas no adaptador deixam visíveis a ordem de locks, os casts, as condições de idempotência e a seleção concorrente da outbox.
+O módulo Nest compõe o adaptador HTTP, a identidade do provedor e o caso de uso. O consumidor SQS usa as mesmas validações de contrato e invoca o mesmo caso de uso. As classes de domínio, descritas na seção seguinte, usam TypeScript puro e factories de criação e reidratação. A aplicação coordena as operações com o `EntityManager.transactional()` do MikroORM. Consultas SQL explícitas no adaptador deixam visíveis a ordem de locks, os casts, as condições de idempotência e a seleção concorrente da outbox.
 
 O Bun executa o JavaScript gerado pelo `tsc`. O compilador emite os metadados de decorators que o Nest usa para injeção. A migration registra a classe diretamente, evitando descoberta de arquivos TypeScript no contêiner.
 
 Autenticação foi adiada conforme o timebox. `ProviderIdentity.verify` é o ponto de extensão HTTP. A integração usaria um guard OIDC com validação de emissor, audiência, validade, assinatura e rotação via JWKS. O principal teria um vínculo com `providerId`, e a autorização de leitura/escrita também verificaria o vínculo com o player. Health permanece aberto. O consumidor confia no canal interno e aplica validações de ID, wallet, player, moeda e escopo das referências.
+
+## Modelo de domínio
+
+O domínio fica em `src/domain/`, sem dependência de NestJS, MikroORM ou SQS. Toda classe tem construtor privado, factory de criação (`create`, `open`, `from`, `receive` ou `enqueue`) e `rehydrate`, que reconstrói o estado persistido sem revalidar transições.
+
+| Classe | Responsabilidade |
+|---|---|
+| `Money` | Centavos em `bigint`, imutável. `add`, `subtract`, `negate`, `isZero`, `isPositive`, `isNegative`, `isLessThan`, `equals`, `toJSON`, `toString`. Operar moedas diferentes lança `CURRENCY_MISMATCH` |
+| `Wallet` | Agregado com `currency`, `version`, `createdAt` e `updatedAt`. `debit` e `credit` devolvem o `WalletLedgerEntry` da movimentação, ou nada para valor zero. O lançamento é montado antes de alterar o saldo, então saldo e ledger não divergem. `openingEntry` gera o crédito de abertura. `assertAccepts` recusa outro player ou outra moeda |
+| `WagerTransaction` | Campos do esqueleto, incluindo `idempotencyKey`, `payloadHash` e `createdAt`. Consultas `isTerminal`, `affectsBalance`, `requiresReference`, `matchesPayload`, `assertReference` e `ledgerDirectionFor`. Transições `markProcessed(ref, at)`, `markPendingReference`, `reject(code)` e `fail(code)` |
+| `WalletLedgerEntry` | Campos somente leitura e congelados, sem métodos de transição. `create` valida valor positivo, saldos não negativos e `balanceBefore ± money = balanceAfter` |
+| `InboxMessage` | `receivedAt`, `isProcessed`, `matchesPayload` e `markProcessed(at)`, que só pode ocorrer uma vez |
+| `OutboxMessage` | `attempts`, `nextAttemptAt` e `publishedAt`. `isPending`, `isDue(now)`, `markPublished(at)` e `scheduleRetry(now)` com backoff de 1, 2, 4 segundos até 256 segundos. O id é o `eventId` |
+| `IntegrationEvent<T>` | Classe abstrata com construtor protegido e `eventType`/`version` abstratos. Cada subclasse tem construtor privado e `static from(...)`, e `data` carrega `MoneyProps` |
+
+`FailureCode` é um conjunto fechado de códigos. Uma regra de negócio violada lança `BusinessRuleViolation(code)`, e o caso de uso só converte esse tipo em `REJECTED`. Erros de entrada (`DomainError`) viram 400 sem persistência. Tentar mudar uma transação terminal lança `InvalidTransactionStateError`, que é erro de programação e não vira rejeição.
+
+Os casos de uso continuam em `src/wagering.ts` e escrevem SQL explícito. O domínio decide, e o adaptador persiste exatamente o estado que as entidades expõem.
 
 ## Dinheiro e saldo
 
