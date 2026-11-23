@@ -1,0 +1,115 @@
+import { ArgumentsHost, Body, Catch, Controller, ExceptionFilter, Get, Headers, HttpException,
+  Injectable, Module, Param, Post, Query, Res, type DynamicModule } from '@nestjs/common';
+import { identifier, moneyFrom, record, uuid, wagerFrom } from './contracts';
+import { query, type Database } from './database';
+import { DomainError } from './domain';
+import { Queues } from './messaging';
+import { log, metricSnapshot } from './observability';
+import { Wagering } from './wagering';
+
+type Response = { status(code: number): Response; json(body: unknown): void };
+const statusCodes = { PROCESSED: 200, PENDING: 202, PENDING_REFERENCE: 202, REJECTED: 422, FAILED: 500 };
+
+@Injectable()
+export class ProviderIdentity {
+  // An OIDC adapter can compare the authenticated provider claim with this input.
+  async verify(_providerId: string): Promise<void> {}
+}
+
+@Controller()
+class Api {
+  constructor(private readonly wagering: Wagering, private readonly queues: Queues,
+    private readonly identity: ProviderIdentity) {}
+
+  @Post('wallets')
+  open(@Body() raw: unknown) {
+    const body = record(raw);
+    return this.wagering.open(uuid(body.playerId), moneyFrom(body.initialBalance));
+  }
+
+  @Get('wallets/:walletId')
+  wallet(@Param('walletId') id: string) { return this.wagering.getWallet(uuid(id)); }
+
+  @Get('wallets/:walletId/ledger')
+  async ledger(@Param('walletId') id: string, @Query('limit') rawLimit: unknown, @Query('cursor') cursor: unknown) {
+    const walletId = uuid(id);
+    const textLimit = rawLimit ?? '50';
+    if (typeof textLimit !== 'string' || !/^([1-9]\d?|100)$/.test(textLimit)) throw new DomainError('INVALID_LIMIT');
+    let after = '0';
+    if (cursor !== undefined) {
+      if (typeof cursor !== 'string' || cursor.length > 100 || !/^[\w-]+$/.test(cursor)) {
+        throw new DomainError('INVALID_CURSOR');
+      }
+      const decoded = Buffer.from(cursor, 'base64url').toString();
+      const [scope, position, extra] = decoded.split(':');
+      if (scope !== walletId || extra !== undefined || !/^\d{1,19}$/.test(position ?? '') ||
+          BigInt(position) > 9223372036854775807n || Buffer.from(decoded).toString('base64url') !== cursor) {
+        throw new DomainError('INVALID_CURSOR');
+      }
+      after = position;
+    }
+    const { entries, nextSequence } = await this.wagering.ledger(walletId, after, Number(textLimit));
+    return { entries, nextCursor: nextSequence ? Buffer.from(walletId + ':' + nextSequence).toString('base64url') : null };
+  }
+
+  @Post('wagering/transactions')
+  async submit(@Body() body: unknown, @Headers('idempotency-key') key: unknown, @Res() response: Response) {
+    const input = wagerFrom(body);
+    await this.identity.verify(input.providerId);
+    const result = (await this.wagering.submit(input, identifier(key, 'IDEMPOTENCY_KEY_REQUIRED')))!;
+    response.status(statusCodes[result.status]).json(result);
+  }
+
+  @Get('wagering/transactions/:transactionId')
+  transaction(@Param('transactionId') id: string) { return this.wagering.getTransaction(uuid(id)); }
+
+  @Get('providers/:providerId/wagering/transactions/:externalTransactionId')
+  externalTransaction(@Param('providerId') provider: string, @Param('externalTransactionId') id: string) {
+    return this.wagering.getTransaction(identifier(id), identifier(provider));
+  }
+
+  @Post('wallets/:walletId/reconciliation')
+  async reconcile(@Param('walletId') id: string, @Res() response: Response) {
+    response.status(200).json(await this.wagering.reconcile(uuid(id)));
+  }
+
+  @Get('health/live')
+  live() { return { status: 'ok' }; }
+
+  @Get('health/ready')
+  async ready() {
+    try {
+      await Promise.all([query(this.wagering.db.em.fork(), 'select 1 from wallet limit 1'), this.queues.ready()]);
+      return { status: 'ok' };
+    } catch { throw new DomainError('DEPENDENCY_UNAVAILABLE', 503); }
+  }
+
+  @Get('metrics')
+  metrics() { return metricSnapshot(); }
+}
+
+@Catch()
+export class HttpErrors implements ExceptionFilter {
+  catch(error: unknown, host: ArgumentsHost): void {
+    const response = host.switchToHttp().getResponse<Response>();
+    if (error instanceof DomainError) {
+      response.status(error.httpStatus).json({ error: error.code });
+    } else if (error instanceof HttpException) {
+      response.status(error.getStatus()).json({ error: error.getStatus() === 400 ? 'INVALID_PAYLOAD' : 'HTTP_ERROR' });
+    } else {
+      log('http_error', { errorType: error instanceof Error ? error.name : 'UnknownError' });
+      response.status(503).json({ error: 'SERVICE_UNAVAILABLE' });
+    }
+  }
+}
+
+@Module({})
+export class ApiModule {
+  static register(db: Database, queues: Queues): DynamicModule {
+    return { module: ApiModule, controllers: [Api], providers: [
+      ProviderIdentity,
+      { provide: Wagering, useValue: new Wagering(db) },
+      { provide: Queues, useValue: queues },
+    ] };
+  }
+}

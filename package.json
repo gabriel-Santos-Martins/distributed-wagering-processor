@@ -1,0 +1,43 @@
+{
+  "name": "distributed-wagering-processor",
+  "private": true,
+  "packageManager": "bun@1.3.3",
+  "scripts": {
+    "start": "bun dist/main.js",
+    "build": "tsc",
+    "typecheck": "tsc --project test/tsconfig.json",
+    "frontend": "bun run frontend:css && bun frontend/server.ts",
+    "frontend:css": "tailwindcss -c frontend/tailwind.config.cjs -i frontend/styles.css -o frontend/generated.css --minify",
+    "frontend:typecheck": "tsc --project frontend/tsconfig.json",
+    "frontend:build": "bun run frontend:css && bun build frontend/index.html --target browser --outdir frontend-dist --minify",
+    "migration:up": "bun dist/database.js up",
+    "migration:down": "bun dist/database.js down",
+    "test:unit": "bun test test/unit.test.ts",
+    "test:integration": "bun test test/integration.test.ts",
+    "test:concurrency": "bun test test/concurrency.test.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "3.922.0",
+    "@mikro-orm/core": "6.5.9",
+    "@mikro-orm/migrations": "6.5.9",
+    "@mikro-orm/postgresql": "6.5.9",
+    "@nestjs/common": "11.1.8",
+    "@nestjs/core": "11.1.8",
+    "@nestjs/platform-express": "11.1.8",
+    "@radix-ui/react-dialog": "1.1.15",
+    "@tanstack/react-query": "5.90.10",
+    "geist": "1.5.1",
+    "lucide-react": "0.554.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.3",
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "tailwindcss": "3.4.19",
+    "typescript": "5.9.3"
+  }
+}
