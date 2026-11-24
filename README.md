@@ -185,7 +185,9 @@ Todos os testes verificam a invariante `wallet.balance == saldo reconstruído pe
 
 **Integração contínua.** O workflow `.github/workflows/ci.yml` roda a cada push: sobe o Compose completo (três instâncias, PostgreSQL, LocalStack e Keycloak), confere a readiness das instâncias, roda `test:keycloak`, envia BETs por cada instância e reconcilia, e depois roda todas as suítes contra o PostgreSQL e o LocalStack dos containers.
 
-**Evidência local** (Windows 11, sem Docker): todas as suítes passaram com PostgreSQL 17.7 nativo, MiniStack 1.1.10 e Keycloak 26.4.0 a partir da distribuição oficial.
+**Evidência.**
+- No CI, em containers do Docker Compose ([execução de referência](https://github.com/gabriel-Santos-Martins/distributed-wagering-processor/actions/runs/45399622833)): três instâncias prontas, `test:keycloak` 12/12, reconciliação consistente após BETs por cada instância, `test:unit` 22, `test:integration` 7, `test:auth` 16 e `test:concurrency` 10, sem falhas.
+- Local (Windows 11, sem Docker): as mesmas suítes passaram com PostgreSQL 17.7 nativo, MiniStack 1.1.10 e Keycloak 26.4.0 a partir da distribuição oficial.
 
 ## Teste de carga
 

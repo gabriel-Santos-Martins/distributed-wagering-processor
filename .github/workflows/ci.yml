@@ -18,7 +18,7 @@ jobs:
       DATABASE_URL: postgresql://wager:wager@localhost:5432/wager
       SQS_ENDPOINT: http://localhost:4566
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: oven-sh/setup-bun@v2
         with:
