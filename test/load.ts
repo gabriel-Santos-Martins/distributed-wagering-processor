@@ -13,6 +13,12 @@ const concurrency = Number(env('LOAD_CONCURRENCY', '32'));
 const durationSeconds = Number(env('LOAD_DURATION_SECONDS', '30'));
 const hotWalletShare = Number(env('LOAD_HOT_WALLET_SHARE', '0.2'));
 const duplicateShare = Number(env('LOAD_DUPLICATE_SHARE', '0.05'));
+// With LOAD_TOKEN_URL (the realm token endpoint), requests carry Keycloak tokens from the client credentials grant:
+// the operator client opens and reconciles wallets, the provider client submits transactions for its provider id.
+const tokenUrl = process.env.LOAD_TOKEN_URL;
+const operatorClient = env('LOAD_OPERATOR_CLIENT', 'back-office:back-office-local-secret');
+const providerClient = env('LOAD_PROVIDER_CLIENT', 'provider-a:provider-a-local-secret');
+const providerId = env('LOAD_PROVIDER_ID', tokenUrl ? 'provider-a' : 'load-provider');
 
 type Wallet = { id: string; playerId: string };
 type Sent = { body: Record<string, unknown>; key: string };
@@ -27,10 +33,30 @@ let maxOutboxAgeSeconds = 0;
 const pick = <T>(items: readonly T[]) => items[Math.floor(Math.random() * items.length)];
 const count = (map: Map<string | number, number>, key: string | number) => map.set(key, (map.get(key) ?? 0) + 1);
 
-async function post(path: string, body: unknown, key?: string) {
+type Role = 'operator' | 'provider';
+const tokens = new Map<Role, { token: string; expiresAt: number }>();
+
+async function bearer(role: Role): Promise<Record<string, string>> {
+  if (!tokenUrl) return {};
+  const cached = tokens.get(role);
+  if (cached && cached.expiresAt > Date.now()) return { Authorization: `Bearer ${cached.token}` };
+  const [clientId, clientSecret] = (role === 'operator' ? operatorClient : providerClient).split(':');
+  const response = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'client_credentials', client_id: clientId, client_secret: clientSecret }),
+  });
+  if (!response.ok) throw new Error(`${clientId}: token endpoint responded ${response.status}`);
+  const body = await response.json() as { access_token: string; expires_in: number };
+  // Renew 30 seconds before expiry; tokens last 5 minutes in the local realm.
+  tokens.set(role, { token: body.access_token, expiresAt: Date.now() + (body.expires_in - 30) * 1000 });
+  return { Authorization: `Bearer ${body.access_token}` };
+}
+
+async function post(path: string, body: unknown, role: Role, key?: string) {
   const response = await fetch(pick(targets) + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(key ? { 'Idempotency-Key': key } : {}) },
+    headers: { 'Content-Type': 'application/json', ...(key ? { 'Idempotency-Key': key } : {}), ...await bearer(role) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15000),
   });
@@ -45,7 +71,8 @@ async function getJson(url: string) {
 async function openWallets(): Promise<Wallet[]> {
   return Promise.all(Array.from({ length: walletCount }, async () => {
     const playerId = randomUUID();
-    const result = await post('/wallets', { playerId, initialBalance: { amount: '1000000.00', currency: 'BRL' } });
+    const result = await post('/wallets', { playerId, initialBalance: { amount: '1000000.00', currency: 'BRL' } },
+      'operator');
     if (result.status !== 201) throw new Error(`Wallet creation failed with ${result.status}`);
     return { id: String(result.body.id), playerId };
   }));
@@ -56,10 +83,10 @@ function nextRequest(wallets: Wallet[], history: Sent[]): Sent {
   const wallet = Math.random() < hotWalletShare ? wallets[0] : pick(wallets);
   const externalTransactionId = randomUUID();
   const kind = Math.random() < 0.8 ? 'BET' : Math.random() < 0.5 ? 'WIN' : 'LOSS';
-  const body = { providerId: 'load-provider', externalTransactionId, playerId: wallet.playerId, walletId: wallet.id,
+  const body = { providerId, externalTransactionId, playerId: wallet.playerId, walletId: wallet.id,
     roundId: 'round-' + randomUUID().slice(0, 8), gameId: 'load-game', kind,
     money: { amount: kind === 'LOSS' ? '0.00' : '1.00', currency: 'BRL' } };
-  return { body, key: 'load-provider:' + externalTransactionId };
+  return { body, key: `${providerId}:${externalTransactionId}` };
 }
 
 async function client(wallets: Wallet[], deadline: number) {
@@ -68,7 +95,7 @@ async function client(wallets: Wallet[], deadline: number) {
     const request = nextRequest(wallets, history);
     const started = performance.now();
     try {
-      const result = await post('/wagering/transactions', request.body, request.key);
+      const result = await post('/wagering/transactions', request.body, 'provider', request.key);
       latencies.push(performance.now() - started);
       count(statuses, result.status);
       if (typeof result.body.failureCode === 'string') count(failureCodes, result.body.failureCode);
@@ -115,7 +142,7 @@ async function main() {
   const elapsedSeconds = (Date.now() - started) / 1000;
   const drainSeconds = await drainOutbox();
   const conflicts = await lockConflicts() - conflictsBefore;
-  const reconciliations = await Promise.all(wallets.map(wallet => post(`/wallets/${wallet.id}/reconciliation`, {})));
+  const reconciliations = await Promise.all(wallets.map(wallet => post(`/wallets/${wallet.id}/reconciliation`, {}, 'operator')));
   const inconsistent = reconciliations.filter(result => result.body.consistent !== true).length;
   
   const sorted = [...latencies].sort((a, b) => a - b);
@@ -125,7 +152,8 @@ async function main() {
   const report = {
     environment: { platform: `${platform()} ${release()}`, cpus: cpus().length, cpuModel: cpus()[0]?.model,
       bun: Bun.version, targets },
-    parameters: { wallets: walletCount, concurrency, durationSeconds, hotWalletShare, duplicateShare },
+    parameters: { wallets: walletCount, concurrency, durationSeconds, hotWalletShare, duplicateShare,
+    authenticated: Boolean(tokenUrl) },
     requests: total,
     throughputPerSecond: Number((latencies.length / elapsedSeconds).toFixed(1)),
     latencyMs: { p50: percentile(sorted, 50), p95: percentile(sorted, 95), p99: percentile(sorted, 99),

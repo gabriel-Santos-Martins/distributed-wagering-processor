@@ -1,6 +1,7 @@
 {
   "name": "distributed-wagering-processor-console",
   "private": true,
+  "author": "Gabriel dos Santos Martins (https://github.com/gabriel-Santos-Martins)",
   "description": "Optional local console for manual testing. Not part of the backend image.",
   "packageManager": "bun@1.3.3",
   "scripts": {
