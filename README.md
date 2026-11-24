@@ -75,6 +75,17 @@ A suíte de concorrência cria três processos nas portas 34101–34103. Ela env
 
 Para repetir apenas os cenários HTTP e PostgreSQL da suíte de concorrência, defina `TEST_POSTGRES_ONLY=1`. Esse modo preserva os três processos e desabilita os cenários que dependem da fila.
 
+### Integração contínua
+
+`.github/workflows/ci.yml` roda a cada push no GitHub Actions (Ubuntu, Docker nativo):
+1. `bun install --frozen-lockfile`, typecheck e testes unitários;
+2. `docker compose --profile cluster up --build`: PostgreSQL, LocalStack, Keycloak, migrations e três instâncias;
+3. readiness das portas 3000, 3001 e 3002, `test:keycloak` contra o container do Keycloak e BETs enviadas por cada instância, com reconciliação consistente no fim;
+4. para as aplicações e roda `test:integration`, `test:auth` e `test:concurrency` contra o PostgreSQL e o LocalStack do Compose;
+5. em falha, publica os logs dos containers.
+
+É a validação do Compose de ponta a ponta, num ambiente limpo, sem depender da máquina do desenvolvedor.
+
 ### Evidência local
 
 | Comando ou requisito | Resultado no Windows |
